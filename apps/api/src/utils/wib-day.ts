@@ -27,6 +27,20 @@ export function wibDayOf(moment: Date): string {
   return new Date(moment.getTime() + 7 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
 
+/**
+ * The WIB calendar month a moment falls on, as `{ year, month }` with `month`
+ * zero-based (0-11) like `Date.getMonth()`.
+ *
+ * The monthly billing job fires at 04:00 WIB on the 1st, which is still the
+ * previous month — and, in January, the previous year — on a UTC server. WIB
+ * is a fixed UTC+7 with no daylight saving, so shifting the instant and reading
+ * the UTC fields derives the WIB month from any server clock.
+ */
+export function wibMonthYear(moment: Date): { year: number; month: number } {
+  const shifted = new Date(moment.getTime() + 7 * 60 * 60 * 1000);
+  return { year: shifted.getUTCFullYear(), month: shifted.getUTCMonth() };
+}
+
 /** A `@db.Date` value as a date input shows it. */
 export function dayOf(date: Date | null): string | null {
   return date ? date.toISOString().slice(0, 10) : null;

@@ -1,0 +1,92 @@
+import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
+import { Prisma } from '@prisma/client';
+
+// The live monthly path (scheduler.ts -> runMonthlyAutoBilling) had no test, so
+// it billed the server's calendar month. The cron fires at 04:00 WIB on the 1st
+// (timezone 'Asia/Jakarta'), when the UTC production server still reads the
+// previous month — every invoice was labelled the month (and in January, the
+// year) that had just ended.
+
+vi.mock('@/lib/logger', () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+}));
+vi.mock('@/lib/prisma', () => ({
+  prisma: {
+    paymentType: { findMany: vi.fn(), findUnique: vi.fn() },
+    student: { findMany: vi.fn() },
+    invoice: { findFirst: vi.fn(), create: vi.fn() },
+  },
+}));
+
+import { prisma } from '@/lib/prisma';
+import { runMonthlyAutoBilling } from './finance-billing.job';
+
+const paymentType = {
+  id: 'pt-spp',
+  name: 'SPP',
+  amount: new Prisma.Decimal(500000),
+  unitId: 'unit-1',
+  unit: { name: 'SD IT' },
+} as never;
+
+const prevTz = process.env.TZ;
+
+describe('runMonthlyAutoBilling bills the WIB calendar month', () => {
+  beforeAll(() => {
+    process.env.TZ = 'UTC';
+    vi.useFakeTimers();
+  });
+  afterAll(() => {
+    vi.useRealTimers();
+    if (prevTz === undefined) delete process.env.TZ;
+    else process.env.TZ = prevTz;
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(prisma.paymentType.findMany).mockResolvedValue([paymentType]);
+    vi.mocked(prisma.paymentType.findUnique).mockResolvedValue(paymentType);
+    vi.mocked(prisma.student.findMany).mockResolvedValue([
+      { id: 'student-1', unitId: 'unit-1', userId: 'user-1' } as never,
+    ]);
+    vi.mocked(prisma.invoice.findFirst).mockResolvedValue(null);
+    vi.mocked(prisma.invoice.create).mockResolvedValue({ id: 'inv' } as never);
+  });
+
+  function createdInvoice() {
+    return vi.mocked(prisma.invoice.create).mock.calls[0][0].data;
+  }
+
+  it('bills August, not July, at 2026-08-01 04:00 WIB (the instant its own cron fires)', async () => {
+    vi.setSystemTime(new Date('2026-07-31T21:00:00Z'));
+    await runMonthlyAutoBilling();
+
+    expect(createdInvoice().period).toBe('Agustus 2026');
+    expect(createdInvoice().dueDate).toEqual(new Date(2026, 7, 10));
+    // The invoice number carries the same WIB month as the period, so the two
+    // never disagree about which month a bill belongs to.
+    expect(createdInvoice().invoiceNumber).toMatch(/^INV-202608-/);
+  });
+
+  it('bills January 2026, not December 2025, at 2026-01-01 02:00 WIB', async () => {
+    vi.setSystemTime(new Date('2025-12-31T19:00:00Z'));
+    await runMonthlyAutoBilling();
+
+    expect(createdInvoice().period).toBe('Januari 2026');
+    expect(createdInvoice().dueDate).toEqual(new Date(2026, 0, 10));
+    expect(createdInvoice().invoiceNumber).toMatch(/^INV-202601-/);
+  });
+
+  it('scopes the idempotence check to the WIB month it bills', async () => {
+    vi.setSystemTime(new Date('2026-07-31T21:00:00Z'));
+    await runMonthlyAutoBilling();
+
+    expect(prisma.invoice.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          dueDate: { gte: new Date(2026, 7, 1), lt: new Date(2026, 8, 1) },
+        }),
+      })
+    );
+  });
+});

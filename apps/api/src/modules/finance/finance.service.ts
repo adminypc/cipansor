@@ -24,6 +24,7 @@ import {
 import { seesAllUnits } from '@/utils/resolve-unit-id';
 import { CLASS_ENROLLMENT_STATUS, STUDENT_STATUS } from '@cipansor/shared';
 import { nisMapForUnit } from '@/utils/student-nis';
+import { wibMonthYear } from '@/utils/wib-day';
 
 // =====================================
 // PAYMENT TYPE SERVICE
@@ -112,10 +113,11 @@ export async function deletePaymentType(id: string) {
 
 async function generateInvoiceNumber(
   unitId?: string,
-  tx?: Prisma.TransactionClient
+  tx?: Prisma.TransactionClient,
+  at: Date = new Date()
 ): Promise<string> {
-  const year = new Date().getFullYear();
-  const month = String(new Date().getMonth() + 1).padStart(2, '0');
+  const { year, month: monthIndex } = wibMonthYear(at);
+  const month = String(monthIndex + 1).padStart(2, '0');
 
   const dbClient: any = tx || prisma;
 
@@ -1536,9 +1538,8 @@ export async function generateBulkSppInvoices(data: {
 }
 
 // Generate recurring bills for all active students (Auto-billing scheduler)
-export async function generateRecurringBills() {
-  const year = new Date().getFullYear();
-  const month = new Date().getMonth();
+export async function generateRecurringBills(at: Date = new Date()) {
+  const { year, month } = wibMonthYear(at);
   const dueDate = new Date(year, month, 10);
   const period = `${
     [

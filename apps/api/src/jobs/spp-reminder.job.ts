@@ -14,6 +14,7 @@ import { prisma } from '@/lib/prisma';
 import { logger } from '@/lib/logger';
 import * as notificationService from '@/modules/notifications/notifications.service';
 import { notificationService as channelService } from '@/modules/notifications/email-sms.service';
+import { wibMonthYear } from '@/utils/wib-day';
 
 const formatter = new Intl.NumberFormat('id-ID', {
   style: 'currency',
@@ -26,8 +27,11 @@ const formatter = new Intl.NumberFormat('id-ID', {
  * linked parents. Returns a summary for logging and tests.
  */
 export async function sendMonthlySppReminders(now: Date = new Date()) {
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+  // Match the WIB month the auto-billing job labelled its invoices with, so the
+  // reminder window does not drift a month away from them.
+  const { year, month } = wibMonthYear(now);
+  const monthStart = new Date(year, month, 1);
+  const monthEnd = new Date(year, month + 1, 0, 23, 59, 59);
 
   const invoices = await prisma.invoice.findMany({
     where: {

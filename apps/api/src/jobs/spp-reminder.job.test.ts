@@ -79,6 +79,18 @@ describe('sendMonthlySppReminders', () => {
     expect(where.dueDate.lte.getMonth()).toBe(6);
   });
 
+  it('uses the WIB month at 2026-08-01 06:00 WIB, not the server’s July', async () => {
+    // The reminder cron fires at 06:00 WIB on the 1st, two hours after
+    // auto-billing. On a UTC server the instant is still 31 July — the window
+    // must follow WIB, or it would look a month behind the invoices just issued.
+    mockFindMany.mockResolvedValue([]);
+    await sendMonthlySppReminders(new Date('2026-07-31T23:00:00Z'));
+
+    const where = mockFindMany.mock.calls[0][0].where;
+    expect(where.dueDate.gte).toEqual(new Date(2026, 7, 1));
+    expect(where.dueDate.lte.getMonth()).toBe(7);
+  });
+
   it('keeps going when one parent notification fails', async () => {
     mockFindMany.mockResolvedValue([invoice()]);
     mockCreateNotification.mockRejectedValueOnce(new Error('boom')).mockResolvedValue({ id: 'n2' });
