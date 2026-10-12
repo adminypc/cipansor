@@ -363,7 +363,7 @@ release plan points at Azure Application Insights). ESLint 10 merged (#604).
   from pages, in 31 areas — proven on staging: `POST /permits/:id/approve`,
   `/curriculum/curriculums`, `/hr/employees`, `/certificates` all 404);
   10 API modules and 9 web routes are misnamed, 35 + 32 more need tidying;
-  22 of 93 modules meet the module standard. Plan in seven phases (roadmap §1):
+  Most modules did not meet the module standard (measured in `known-issues.md`). Plan in seven phases (roadmap §1):
   guards → reconnect the broken contract → glossary → consolidate duplicates →
   API by context under `/api/v1` with a Zod → OpenAPI contract → web → harden
   → docs. The glossary still comes before Model A's permission keys.
