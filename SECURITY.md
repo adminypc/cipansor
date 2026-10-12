@@ -4,7 +4,7 @@
 
 Do not open a public issue for a security problem. Report it privately through
 GitHub: **Security → Report a vulnerability**
-(<https://github.com/ypcipansor/cipansor/security/advisories/new>). Only the
+(<https://github.com/cipansor/cipansor/security/advisories/new>). Only the
 maintainers see it until a fix is ready and you agree to disclose it.
 
 Include, as far as you know: what is affected (a URL or a module), the steps to

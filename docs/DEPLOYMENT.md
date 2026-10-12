@@ -42,7 +42,7 @@ Panduan deployment sistem Cipansor untuk production.
 ### 1. Clone Repository
 
 ```bash
-git clone https://github.com/ypcipansor/cipansor.git
+git clone https://github.com/cipansor/cipansor.git
 cd cipansor
 ```
 
@@ -441,8 +441,8 @@ kill -9 <PID>
 
 ## Support
 
-- Repositori: <https://github.com/ypcipansor/cipansor>
-- Isu & permintaan: <https://github.com/ypcipansor/cipansor/issues>
+- Repositori: <https://github.com/cipansor/cipansor>
+- Isu & permintaan: <https://github.com/cipansor/cipansor/issues>
 - Konvensi pengembangan: [`AGENTS.md`](../AGENTS.md)
 
 Untuk catatan insiden produksi dan langkah pemulihannya, lihat
