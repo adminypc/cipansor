@@ -110,7 +110,7 @@ describe('Finance Service Unit Tests', () => {
       const dto = {
         title: 'Pembayaran SPP Januari',
         amount: 500000,
-        dueDate: '2026-03-01T00:00:00.000Z',
+        dueDate: '2026-03-01',
         studentId: 'stud-1',
         paymentTypeId: 'pt-1',
       };
@@ -124,7 +124,7 @@ describe('Finance Service Unit Tests', () => {
         },
         paymentType: { id: 'pt-1', name: 'SPP', code: 'SPP-01' },
         amount: new Prisma.Decimal(500000),
-        dueDate: new Date(dto.dueDate),
+        dueDate: new Date('2026-03-01T00:00:00.000Z'),
       };
 
       vi.mocked(prisma.invoice.findFirst).mockResolvedValue(null);
@@ -143,7 +143,7 @@ describe('Finance Service Unit Tests', () => {
       const dto = {
         title: 'Pembayaran SPP Januari',
         amount: 500000,
-        dueDate: '2026-03-01T00:00:00.000Z',
+        dueDate: '2026-03-01',
         studentId: 'stud-1',
         paymentTypeId: 'pt-1',
       };
@@ -181,17 +181,16 @@ describe('Finance Service Unit Tests', () => {
       expect(Number(createArgs.data.amount)).toBe(250000);
     });
 
-    it('normalizes a supplied WIB-midnight due date to the date-only value of its WIB day', async () => {
-      // `createInvoice` preserves whatever instant a caller sends. A caller that
-      // means "1 August" as 00:00 WIB sends 2026-07-31T17:00Z, which on a UTC
-      // server reads as 31 July — outside August's UTC-month bounds, so the
-      // generator would bill it twice and the reminder would miss it. The writer
-      // stores the WIB calendar day instead.
+    it('stores a supplied deadline as the date-only value of the day it names', async () => {
+      // A bill's deadline is a calendar day. `createInvoice` stores it at
+      // midnight UTC — the form the monthly guard, the reminder window and the
+      // academic-year bounds all compare against — so "10 August" is stored as
+      // 2026-08-10T00:00Z and renders as the 10th, whatever the server zone.
       vi.mocked(prisma.invoice.findFirst).mockResolvedValue(null);
       vi.mocked(prisma.invoice.create).mockResolvedValue({
         id: 'inv-3',
         amount: new Prisma.Decimal(500000),
-        dueDate: new Date('2026-08-01T00:00:00.000Z'),
+        dueDate: new Date('2026-08-10T00:00:00.000Z'),
         student: { user: { id: 'u1' } },
         paymentType: { name: 'SPP' },
       } as any);
@@ -199,23 +198,22 @@ describe('Finance Service Unit Tests', () => {
 
       await financeService.createInvoice({
         amount: 500000,
-        dueDate: '2026-07-31T17:00:00.000Z', // 1 August 00:00 WIB
+        dueDate: '2026-08-10',
         studentId: 'stud-1',
         paymentTypeId: 'pt-1',
       } as any);
 
       const createArgs = vi.mocked(prisma.invoice.create).mock.calls[0][0];
-      expect((createArgs.data.dueDate as Date).toISOString()).toBe('2026-08-01T00:00:00.000Z');
+      expect((createArgs.data.dueDate as Date).toISOString()).toBe('2026-08-10T00:00:00.000Z');
     });
 
-    it('normalizes an update due date to the date-only value of its WIB day', async () => {
+    it('stores an update deadline as the date-only value of the day it names', async () => {
       vi.mocked(prisma.invoice.update).mockResolvedValue({ id: 'inv-1' } as any);
 
-      await financeService.updateInvoice('inv-1', { dueDate: '2026-07-31T18:00:00.000Z' } as any);
+      await financeService.updateInvoice('inv-1', { dueDate: '2026-08-10' } as any);
 
       const updateArgs = vi.mocked(prisma.invoice.update).mock.calls[0][0];
-      // 2026-07-31 18:00Z is 1 August 01:00 WIB.
-      expect((updateArgs.data.dueDate as Date).toISOString()).toBe('2026-08-01T00:00:00.000Z');
+      expect((updateArgs.data.dueDate as Date).toISOString()).toBe('2026-08-10T00:00:00.000Z');
     });
   });
 });
@@ -336,12 +334,10 @@ describe('generateBulkSppInvoices', () => {
   });
 
   it('finds a manually created first-day invoice and does not bill it again', async () => {
-    // The gate's scenario: a manual SPP invoice the caller meant as "1 August"
-    // (00:00 WIB = 2026-07-31T17:00Z). Before normalization that value was
-    // stored as-is and fell outside the guard's [2026-08-01Z, 2026-09-01Z)
-    // band, so August generation billed the student twice and the reminder
-    // missed the original. `createInvoice` now stores the WIB day, so the guard
-    // finds it.
+    // The gate's scenario: a manual SPP invoice the caller meant as "1 August".
+    // The create contract is the calendar day, stored date-only (2026-08-01T00:00Z),
+    // so the guard's [2026-08-01Z, 2026-09-01Z) band finds it and August
+    // generation does not bill the student twice.
     const prevTz = process.env.TZ;
     process.env.TZ = 'UTC';
     try {
@@ -376,7 +372,7 @@ describe('generateBulkSppInvoices', () => {
 
       await financeService.createInvoice({
         amount: 350000,
-        dueDate: '2026-07-31T17:00:00.000Z', // 1 August 00:00 WIB
+        dueDate: '2026-08-01', // 1 August, the calendar day
         studentId: 'student-1',
         paymentTypeId: 'pt-spp',
       } as any);

@@ -13,13 +13,24 @@ export function wibDayEnd(day: string): Date {
 }
 
 /**
- * A date input's day as a `@db.Date` value (midnight UTC, which is how Prisma
- * reads and writes a DATE column). `undefined` stays undefined, so a PATCH
+ * A date input's day as the value a date-only column holds: midnight UTC
+ * (`@db.Date`, and the form `academic-calendar.ts` and `academicYearBillingWindow`
+ * already use). A `DateTime` column kept as a calendar day — `Invoice.dueDate` —
+ * holds the same value, so every reader that stringifies it without a timezone
+ * (`toLocaleDateString('id-ID')`) and every filter that bounds it with a UTC
+ * first-of-month agree on the day.
+ */
+export function dayDate(day: string): Date {
+  return new Date(`${day}T00:00:00.000Z`);
+}
+
+/**
+ * The same day for an optional field: `undefined` stays undefined, so a PATCH
  * leaves the column alone; an empty value clears it.
  */
 export function calendarDate(value: string | null | undefined): Date | null | undefined {
   if (value === undefined) return undefined;
-  return value ? new Date(`${value}T00:00:00.000Z`) : null;
+  return value ? dayDate(value) : null;
 }
 
 /** The WIB calendar day a moment falls on, as a date input shows it. */
@@ -69,19 +80,6 @@ export function utcMonthRange(year: number, month: number): { start: Date; end: 
     start: new Date(Date.UTC(year, month, 1)),
     end: new Date(Date.UTC(nextYear, nextMonth, 1)),
   };
-}
-
-/**
- * The date-only value (midnight UTC) of the WIB calendar day an instant falls
- * on. Applied at the manual create/update paths so a `dueDate` this module
- * writes can be read as a date alone — the generators already produce that form
- * via `wibDate`. A caller that means "1 August" as 00:00 WIB sends
- * `2026-07-31T17:00Z`, which on a UTC server reads as 31 July; normalizing to the
- * WIB day (2026-08-01T00:00Z) keeps it inside August's `utcMonthRange`, so the
- * bulk generator's guard finds it and the reminder reaches it.
- */
-export function wibDayDate(moment: Date): Date {
-  return new Date(`${wibDayOf(moment)}T00:00:00.000Z`);
 }
 
 /** A `@db.Date` value as a date input shows it. */
