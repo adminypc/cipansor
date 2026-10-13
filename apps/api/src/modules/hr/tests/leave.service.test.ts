@@ -26,14 +26,19 @@ const { prismaMock, runTransaction, lazy } = vi.hoisted(() => {
       // `__store` is the in-memory state the write mocks mutate (a real
       // transaction writes to the DB and rolls it back). Snapshot it before the
       // callback and put it back if the callback throws, so a test can observe
-      // that a failed transaction changed nothing.
+      // that a failed transaction changed nothing. `inTransaction` marks the
+      // scope a real transaction holds: a read that lands while it is set is a
+      // read no concurrent statement can slip in front of.
       const store = client.__store;
       const snapshot = store ? clone(store) : undefined;
+      if (store) store.inTransaction = true;
       try {
         return await (arg as (tx: typeof client) => unknown)(client);
       } catch (error) {
         if (snapshot !== undefined) client.__store = snapshot;
         throw error;
+      } finally {
+        if (client.__store) client.__store.inTransaction = false;
       }
     }
     // Prisma's array form issues the operations in order and stops at the
@@ -80,6 +85,7 @@ const { prismaMock, runTransaction, lazy } = vi.hoisted(() => {
       attendance: [] as unknown[],
       balanceUpdated: false,
       leaveStatus: '' as string,
+      inTransaction: false,
     },
   };
   prismaMock.$transaction.mockImplementation((arg: unknown) => runTransaction(arg, prismaMock));
@@ -108,7 +114,12 @@ const db = prismaMock as {
   staffAttendance: Record<string, ReturnType<typeof vi.fn>>;
   auditLog: { create: ReturnType<typeof vi.fn> };
   $transaction: ReturnType<typeof vi.fn>;
-  __store: { attendance: unknown[]; balanceUpdated: boolean; leaveStatus: string };
+  __store: {
+    attendance: unknown[];
+    balanceUpdated: boolean;
+    leaveStatus: string;
+    inTransaction: boolean;
+  };
 };
 
 const STAFF = '11111111-1111-4111-8111-111111111111';
@@ -144,6 +155,7 @@ beforeEach(() => {
   db.__store.attendance = [];
   db.__store.balanceUpdated = false;
   db.__store.leaveStatus = LeaveStatus.PENDING;
+  db.__store.inTransaction = false;
   db.leave.create.mockImplementation(async ({ data }: { data: unknown }) => ({
     id: 'leave-1',
     ...(data as object),
@@ -467,11 +479,29 @@ describe('approveLeave', () => {
         approvedById: 'approver-1',
       }),
     });
+    // The move and the row reported for it run in one transaction, so the
+    // response cannot show a decision a concurrent request made in between.
+    expect(db.$transaction).toHaveBeenCalledTimes(1);
     expect(db.leaveBalance.update).not.toHaveBeenCalled();
     expect(db.staffAttendance.upsert).not.toHaveBeenCalled();
     expect(db.staffAttendance.update).not.toHaveBeenCalled();
     expect(db.staffAttendance.create).not.toHaveBeenCalled();
-    expect(db.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('reads the rejected row inside the transaction, not after it', async () => {
+    db.leave.findUnique.mockResolvedValue(leaveRow({ status: LeaveStatus.PENDING }));
+    db.leave.findUniqueOrThrow.mockImplementation(async () => {
+      // A real transaction holds the row lock until commit; the read that
+      // builds the response must happen in that scope, or a `cancelLeave` or
+      // `deleteLeave` could move or remove the row between write and read.
+      expect(db.__store.inTransaction).toBe(true);
+      return leaveRow({ status: LeaveStatus.REJECTED });
+    });
+
+    await approveLeave('leave-1', 'approver-1', { status: LeaveStatus.REJECTED });
+
+    expect(db.leave.findUniqueOrThrow).toHaveBeenCalledTimes(1);
+    expect(db.__store.inTransaction).toBe(false);
   });
 
   it('refuses a rejection whose pending status was decided by a concurrent request', async () => {
@@ -484,6 +514,9 @@ describe('approveLeave', () => {
       approveLeave('leave-1', 'approver-1', { status: LeaveStatus.REJECTED })
     ).rejects.toThrow(/sudah diputuskan/i);
 
+    // The read is skipped: a 409 carries no row, and reading one would race the
+    // decision that won.
+    expect(db.leave.findUniqueOrThrow).not.toHaveBeenCalled();
     expect(db.leaveBalance.update).not.toHaveBeenCalled();
     expect(db.staffAttendance.create).not.toHaveBeenCalled();
   });

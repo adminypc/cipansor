@@ -2596,23 +2596,32 @@ export async function approveLeave(id: string, approverId: string, data: Approve
   // fields only, so the approver is written as `approvedById` here, not as
   // `approvedBy: { connect }` (which only `update` accepts).
   if (data.status !== LeaveStatus.APPROVED) {
-    const { count } = await prisma.leave.updateMany({
-      where: { id, status: existing.status },
-      data: {
-        status: data.status,
-        approvedById: approverId,
-        approvedAt: new Date(),
-        ...(data.rejectedNote ? { rejectedNote: data.rejectedNote } : {}),
-      },
-    });
-    if (count !== 1) {
-      throw Errors.conflict(
-        'Cuti ini sudah diputuskan oleh permintaan lain. Muat ulang halaman untuk melihat status terbarunya.'
-      );
-    }
-    return prisma.leave.findUniqueOrThrow({
-      where: { id },
-      include: { staff: true, teacher: true },
+    const rejectData: Prisma.LeaveUncheckedUpdateManyInput = {
+      status: data.status,
+      approvedById: approverId,
+      approvedAt: new Date(),
+      ...(data.rejectedNote ? { rejectedNote: data.rejectedNote } : {}),
+    };
+
+    // The decision and the row reported for it are one unit. Written and read as
+    // two statements, a `cancelLeave` or `deleteLeave` landing in between would
+    // make a committed rejection answer CANCELLED, or throw on a row that no
+    // longer exists. The row lock the update takes is held until commit, so
+    // neither can slip in and the response is the row this write produced.
+    return prisma.$transaction(async (tx) => {
+      const { count } = await tx.leave.updateMany({
+        where: { id, status: existing.status },
+        data: rejectData,
+      });
+      if (count !== 1) {
+        throw Errors.conflict(
+          'Cuti ini sudah diputuskan oleh permintaan lain. Muat ulang halaman untuk melihat status terbarunya.'
+        );
+      }
+      return tx.leave.findUniqueOrThrow({
+        where: { id },
+        include: { staff: true, teacher: true },
+      });
     });
   }
 
