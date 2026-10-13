@@ -77,6 +77,17 @@ describe('runMonthlyAutoBilling bills the WIB calendar month', () => {
     expect(createdInvoice().invoiceNumber).toMatch(/^INV-202601-/);
   });
 
+  it('numbers a backdated run from the billed month, not the wall clock', async () => {
+    // System clock sits in September, but the caller asks the job to bill
+    // August. The invoice number must follow the billed month, or it disagrees
+    // with the period it was created for.
+    vi.setSystemTime(new Date('2026-09-15T04:00:00Z'));
+    await runMonthlyAutoBilling(new Date('2026-07-31T21:00:00Z'));
+
+    expect(createdInvoice().period).toBe('Agustus 2026');
+    expect(createdInvoice().invoiceNumber).toMatch(/^INV-202608-/);
+  });
+
   it('scopes the idempotence check to the WIB month it bills', async () => {
     vi.setSystemTime(new Date('2026-07-31T21:00:00Z'));
     await runMonthlyAutoBilling();

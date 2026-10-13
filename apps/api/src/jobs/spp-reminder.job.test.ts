@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Prisma } from '@prisma/client';
 
+// The cron fires at 06:00 WIB on the 1st. On a UTC server the instant is still
+// 23:00 the day before, so the window is derived from the WIB month. Its
+// boundaries are instants at 00:00 WIB (UTC+7), built with an explicit offset —
+// not with `new Date(year, month, …)`, which reads the server's timezone.
+
 vi.mock('@/lib/prisma', () => ({
   prisma: {
     invoice: { findMany: vi.fn() },
@@ -69,14 +74,16 @@ describe('sendMonthlySppReminders', () => {
     expect(mockSend.mock.calls[0][0].message).toContain('Ahmad');
   });
 
-  it('only targets unpaid invoices due in the given month', async () => {
+  it('targets a half-open WIB month [start, end) for unpaid invoices', async () => {
     mockFindMany.mockResolvedValue([]);
     await sendMonthlySppReminders(new Date('2026-07-15'));
 
     const where = mockFindMany.mock.calls[0][0].where;
     expect(where.status.in).toEqual(['PENDING', 'PARTIAL', 'OVERDUE']);
-    expect(where.dueDate.gte).toEqual(new Date(2026, 6, 1));
-    expect(where.dueDate.lte.getMonth()).toBe(6);
+    // 00:00 WIB on 1 July = 2026-06-30T17:00:00Z; 00:00 WIB on 1 August =
+    // 2026-07-31T17:00:00Z. `lt` (not `lte` on 23:59:59) keeps the month exact.
+    expect(where.dueDate.gte).toEqual(new Date('2026-06-30T17:00:00.000Z'));
+    expect(where.dueDate.lt).toEqual(new Date('2026-07-31T17:00:00.000Z'));
   });
 
   it('uses the WIB month at 2026-08-01 06:00 WIB, not the server’s July', async () => {
@@ -87,8 +94,27 @@ describe('sendMonthlySppReminders', () => {
     await sendMonthlySppReminders(new Date('2026-07-31T23:00:00Z'));
 
     const where = mockFindMany.mock.calls[0][0].where;
-    expect(where.dueDate.gte).toEqual(new Date(2026, 7, 1));
-    expect(where.dueDate.lte.getMonth()).toBe(7);
+    expect(where.dueDate.gte).toEqual(new Date('2026-07-31T17:00:00.000Z'));
+    expect(where.dueDate.lt).toEqual(new Date('2026-08-31T17:00:00.000Z'));
+  });
+
+  it('includes an invoice due the first instant of the WIB month and excludes one due the first instant of the next', async () => {
+    // Boundary: the invoice that used to fall on the wrong side. 2026-07-31
+    // 18:00Z is 1 August 01:00 WIB (inside the window); 2026-08-31 18:00Z is
+    // 1 September 01:00 WIB (outside it).
+    mockFindMany.mockResolvedValue([]);
+    await sendMonthlySppReminders(new Date('2026-08-01T04:00:00Z'));
+
+    const where = mockFindMany.mock.calls[0][0].where;
+    const firstWibDay = new Date('2026-07-31T17:00:00.000Z'); // 1 Aug 00:00 WIB
+    const nextWibMonth = new Date('2026-08-31T17:00:00.000Z'); // 1 Sep 00:00 WIB
+    expect(where.dueDate.gte).toEqual(firstWibDay);
+    expect(where.dueDate.lt).toEqual(nextWibMonth);
+
+    const justInside = new Date('2026-07-31T18:00:00Z');
+    const justOutside = new Date('2026-08-31T18:00:00Z');
+    expect(justInside >= where.dueDate.gte && justInside < where.dueDate.lt).toBe(true);
+    expect(justOutside >= where.dueDate.gte && justOutside < where.dueDate.lt).toBe(false);
   });
 
   it('keeps going when one parent notification fails', async () => {

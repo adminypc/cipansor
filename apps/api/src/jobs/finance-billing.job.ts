@@ -46,6 +46,7 @@ export async function runMonthlyAutoBilling(at: Date = new Date()): Promise<void
           year,
           month,
           dueDay: 10, // Default due date on the 10th
+          at, // number the invoices from the billed month, not the wall clock
         });
 
         totalCreated += result.created;

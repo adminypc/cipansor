@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Prisma } from '@prisma/client';
-import { prisma } from '../../lib/prisma';
-import { generateRecurringBills } from './finance.service';
+import { prisma } from '../../../lib/prisma';
+import { generateRecurringBills } from '../finance.service';
 import { STUDENT_STATUS } from '@cipansor/shared';
 
 // Mock all external dependencies
-vi.mock('../../lib/prisma', () => ({
+vi.mock('../../../lib/prisma', () => ({
   prisma: {
     student: {
       findMany: vi.fn(),
@@ -90,6 +90,35 @@ describe('Finance Scheduler Unit Tests - Auto Billing', () => {
 
       expect(result.processed).toBe(1);
       expect(result.created).toBe(1);
+    });
+
+    it('numbers and labels a backdated run from its billed month, not the clock', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-09-15T04:00:00Z'));
+      try {
+        vi.mocked(prisma.student.findMany).mockResolvedValue([
+          { id: 'student-1', unitId: 'unit-1', userId: 'user-1' } as any,
+        ]);
+        vi.mocked(prisma.paymentType.findMany).mockResolvedValue([
+          {
+            id: 'pt-spp',
+            code: 'SPP',
+            amount: new Prisma.Decimal(500000),
+            unitId: 'unit-1',
+            name: 'SPP',
+          } as any,
+        ]);
+        vi.mocked(prisma.invoice.findFirst).mockResolvedValue(null);
+        vi.mocked(prisma.invoice.create).mockResolvedValue({ id: 'inv-new' } as any);
+
+        await generateRecurringBills(new Date('2026-07-31T21:00:00Z')); // 1 Aug WIB
+
+        const createCall = vi.mocked(prisma.invoice.create).mock.calls[0][0];
+        expect(createCall.data.period).toBe('Agustus 2026');
+        expect(createCall.data.invoiceNumber).toMatch(/^INV-202608-/);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('should skip invoice creation if already billed for the month', async () => {

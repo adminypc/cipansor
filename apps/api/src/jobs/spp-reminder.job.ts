@@ -14,7 +14,7 @@ import { prisma } from '@/lib/prisma';
 import { logger } from '@/lib/logger';
 import * as notificationService from '@/modules/notifications/notifications.service';
 import { notificationService as channelService } from '@/modules/notifications/email-sms.service';
-import { wibMonthYear } from '@/utils/wib-day';
+import { wibMonthYear, wibMonthRange } from '@/utils/wib-day';
 
 const formatter = new Intl.NumberFormat('id-ID', {
   style: 'currency',
@@ -30,13 +30,16 @@ export async function sendMonthlySppReminders(now: Date = new Date()) {
   // Match the WIB month the auto-billing job labelled its invoices with, so the
   // reminder window does not drift a month away from them.
   const { year, month } = wibMonthYear(now);
-  const monthStart = new Date(year, month, 1);
-  const monthEnd = new Date(year, month + 1, 0, 23, 59, 59);
+  // Boundaries are instants, so they must be built at 00:00 WIB — [start, end)
+  // with `end` the 1st of the next WIB month. `new Date(year, month, 1)` reads
+  // the fields in the server's timezone: on a UTC server it starts the month at
+  // 07:00 WIB and lets the last seven hours of the month leak into the next.
+  const { start: monthStart, end: monthEnd } = wibMonthRange(year, month);
 
   const invoices = await prisma.invoice.findMany({
     where: {
       status: { in: [PaymentStatus.PENDING, PaymentStatus.PARTIAL, PaymentStatus.OVERDUE] },
-      dueDate: { gte: monthStart, lte: monthEnd },
+      dueDate: { gte: monthStart, lt: monthEnd },
     },
     include: {
       paymentType: { select: { name: true } },

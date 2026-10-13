@@ -1453,8 +1453,16 @@ export async function generateBulkSppInvoices(data: {
   year: number;
   month: number; // 0-11
   dueDay?: number;
+  /**
+   * The instant the run belongs to, used only to number the invoices it
+   * creates. A backdated run (`runMonthlyAutoBilling(at)`) bills `year`/`month`
+   * but must number its invoices from that same month, not from the wall clock
+   * — otherwise an August run labels its invoices `INV-202609-`. Defaults to
+   * now, so a manual bulk run from the UI is unchanged.
+   */
+  at?: Date;
 }) {
-  const { unitId, classId, paymentTypeId, year, month, dueDay = 10 } = data;
+  const { unitId, classId, paymentTypeId, year, month, dueDay = 10, at = new Date() } = data;
 
   const paymentType = await prisma.paymentType.findUnique({
     where: { id: paymentTypeId },
@@ -1514,7 +1522,7 @@ export async function generateBulkSppInvoices(data: {
     });
 
     if (!existing) {
-      const invoiceNumber = await generateInvoiceNumber();
+      const invoiceNumber = await generateInvoiceNumber(undefined, undefined, at);
       const invoice = await prisma.invoice.create({
         data: {
           studentId: student.id,
@@ -1602,7 +1610,7 @@ export async function generateRecurringBills(at: Date = new Date()) {
       });
 
       if (!existing) {
-        const invoiceNumber = await generateInvoiceNumber();
+        const invoiceNumber = await generateInvoiceNumber(undefined, undefined, at);
         await prisma.invoice.create({
           data: {
             studentId: student.id,
