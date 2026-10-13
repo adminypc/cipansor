@@ -18,7 +18,7 @@
 import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parse } from "yaml";
+import { parseAllDocuments } from "yaml";
 import semver from "semver";
 
 const REGISTRY = process.env.NPM_REGISTRY_URL || "https://registry.npmjs.org";
@@ -94,7 +94,23 @@ if (!(threshold in SEVERITY_RANK)) {
 }
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const lockfile = parse(readFileSync(resolve(repoRoot, "pnpm-lock.yaml"), "utf8"));
+// pnpm 12 writes the lockfile as TWO YAML documents: the first pins the
+// package manager itself (`packageManagerDependencies`, plus the `@pnpm/exe`
+// packages), the second holds the workspace tree. `parse()` rejects that with
+// MULTIPLE_DOCS, so read every document and union the top-level maps
+// (`importers`, `packages`, `snapshots`) rather than letting a later document
+// overwrite an earlier one's packages.
+const lockfile = parseAllDocuments(
+  readFileSync(resolve(repoRoot, "pnpm-lock.yaml"), "utf8"),
+).reduce((merged, doc) => {
+  for (const [key, value] of Object.entries(doc.toJSON() ?? {})) {
+    merged[key] =
+      value && typeof value === "object" && !Array.isArray(value)
+        ? { ...(merged[key] ?? {}), ...value }
+        : value;
+  }
+  return merged;
+}, {});
 
 // pnpm-lock v9: `packages:` keys look like "qs@6.14.1" or
 // "@scope/name@1.2.3(peer@x)(...)" — strip the peer suffix, split on the
