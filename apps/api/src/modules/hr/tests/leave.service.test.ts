@@ -54,6 +54,7 @@ const { prismaMock, runTransaction, lazy } = vi.hoisted(() => {
       aggregate: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
       delete: vi.fn(),
     },
     staff: { findUnique: vi.fn() },
@@ -134,6 +135,9 @@ beforeEach(() => {
   db.$transaction.mockImplementation((arg: unknown) => runTransaction(arg, prismaMock));
   db.leave.findFirst.mockResolvedValue(null);
   db.leave.aggregate.mockResolvedValue({ _sum: { totalDays: 0 } });
+  // The status moves (`approveLeave`, `cancelLeave`) are guarded `updateMany`s;
+  // by default they match the one row the service expects.
+  db.leave.updateMany.mockResolvedValue({ count: 1 });
   db.leaveBalance.findUnique.mockResolvedValue(null);
   db.leaveBalance.findMany.mockResolvedValue([]);
   db.leaveTypeConfig.findUnique.mockResolvedValue(null);
@@ -472,7 +476,7 @@ describe('approveLeave', () => {
 
   it('spends the balance once and marks attendance when approving a pending leave', async () => {
     db.leave.findUnique.mockResolvedValue(leaveRow({ status: LeaveStatus.PENDING }));
-    db.leave.update.mockResolvedValue(leaveRow({ status: LeaveStatus.APPROVED }));
+    db.leave.findUniqueOrThrow.mockResolvedValue(leaveRow({ status: LeaveStatus.APPROVED }));
     db.academicYear.findFirst.mockResolvedValue({ id: 'ay-1' });
     db.leaveBalance.findUnique.mockResolvedValue({ id: 'bal-1' });
     // A day the person already attended: the approval overwrites the status but
@@ -487,6 +491,14 @@ describe('approveLeave', () => {
 
     await approveLeave('leave-1', 'approver-1', { status: LeaveStatus.APPROVED });
 
+    // The status move is guarded on PENDING, so a concurrent decision loses.
+    expect(db.leave.updateMany).toHaveBeenCalledWith({
+      where: { id: 'leave-1', status: LeaveStatus.PENDING },
+      data: expect.objectContaining({
+        status: LeaveStatus.APPROVED,
+        approvedById: 'approver-1',
+      }),
+    });
     expect(db.leaveBalance.update).toHaveBeenCalledTimes(1);
     expect(db.leaveBalance.update).toHaveBeenCalledWith({
       where: { id: 'bal-1' },
@@ -505,12 +517,69 @@ describe('approveLeave', () => {
     expect(db.auditLog.create).toHaveBeenCalledTimes(1);
   });
 
-  it('rolls back the whole approval when the last attendance day refuses', async () => {
-    // A 3-day leave: day 1 and day 2 write, day 3 refuses. The date range comes
-    // from the row the guard read, so the fixture that feeds `findUnique` sets it.
+  it('marks attendance on the dates the transaction wrote, not the guard\u2019s stale snapshot', async () => {
+    // The guard reads January 5–6; `updateLeave` commits January 10–11 before
+    // the approval's own row update. The attendance days must follow the row the
+    // transaction returns, or the leave is approved for dates it never marks.
     db.leave.findUnique.mockResolvedValue(
       leaveRow({
         status: LeaveStatus.PENDING,
+        startDate: new Date('2026-01-05T00:00:00.000Z'),
+        endDate: new Date('2026-01-06T00:00:00.000Z'),
+        totalDays: 2,
+      })
+    );
+    db.leave.findUniqueOrThrow.mockResolvedValue(
+      leaveRow({
+        status: LeaveStatus.APPROVED,
+        startDate: new Date('2026-01-10T00:00:00.000Z'),
+        endDate: new Date('2026-01-11T00:00:00.000Z'),
+        totalDays: 2,
+      })
+    );
+    db.academicYear.findFirst.mockResolvedValue({ id: 'ay-1' });
+    db.leaveBalance.findUnique.mockResolvedValue({ id: 'bal-1' });
+    db.staffAttendance.findUnique.mockResolvedValue(null);
+    db.staffAttendance.create.mockResolvedValue({});
+
+    await approveLeave('leave-1', 'approver-1', { status: LeaveStatus.APPROVED });
+
+    const marked = db.staffAttendance.create.mock.calls.map((call) =>
+      (call[0] as { data: { date: Date } }).data.date.toISOString()
+    );
+    expect(marked).toEqual(['2026-01-10T00:00:00.000Z', '2026-01-11T00:00:00.000Z']);
+  });
+
+  it('refuses an approval whose pending status was decided by a concurrent request', async () => {
+    db.leave.findUnique.mockResolvedValue(leaveRow({ status: LeaveStatus.PENDING }));
+    // The guarded move matches nothing: another request decided the row first.
+    db.leave.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(
+      approveLeave('leave-1', 'approver-1', { status: LeaveStatus.APPROVED })
+    ).rejects.toThrow(/sudah diputuskan/i);
+
+    expect(db.leaveBalance.update).not.toHaveBeenCalled();
+    expect(db.staffAttendance.create).not.toHaveBeenCalled();
+    expect(db.staffAttendance.update).not.toHaveBeenCalled();
+    expect(db.auditLog.create).not.toHaveBeenCalled();
+  });
+
+  it('rolls back the whole approval when the last attendance day refuses', async () => {
+    // A 3-day leave: day 1 and day 2 write, day 3 refuses. The date range comes
+    // from the row the transaction returns, so the fixture feeding
+    // `findUniqueOrThrow` sets it.
+    db.leave.findUnique.mockResolvedValue(
+      leaveRow({
+        status: LeaveStatus.PENDING,
+        startDate: new Date('2026-01-05T00:00:00.000Z'),
+        endDate: new Date('2026-01-07T00:00:00.000Z'),
+        totalDays: 3,
+      })
+    );
+    db.leave.findUniqueOrThrow.mockResolvedValue(
+      leaveRow({
+        status: LeaveStatus.APPROVED,
         startDate: new Date('2026-01-05T00:00:00.000Z'),
         endDate: new Date('2026-01-07T00:00:00.000Z'),
         totalDays: 3,
@@ -524,14 +593,9 @@ describe('approveLeave', () => {
     // effect in `__store` just as a real write would touch the DB. A lazy
     // operation that is never awaited writes nothing.
     let attempted = 0;
-    db.leave.update.mockImplementation(async ({ data }: { data: { status: LeaveStatus } }) => {
+    db.leave.updateMany.mockImplementation(async ({ data }: { data: { status: LeaveStatus } }) => {
       db.__store.leaveStatus = data.status;
-      return leaveRow({
-        status: data.status,
-        startDate: new Date('2026-01-05T00:00:00.000Z'),
-        endDate: new Date('2026-01-07T00:00:00.000Z'),
-        totalDays: 3,
-      });
+      return { count: 1 };
     });
     db.staffAttendance.create.mockImplementation(() =>
       lazy(() => {
@@ -569,7 +633,7 @@ describe('approveLeave', () => {
     db.leave.findUnique.mockResolvedValue(
       leaveRow({ status: db.__store.leaveStatus as LeaveStatus })
     );
-    db.leave.update.mockResolvedValue(leaveRow({ status: LeaveStatus.CANCELLED }));
+    db.leave.findUniqueOrThrow.mockResolvedValue(leaveRow({ status: LeaveStatus.CANCELLED }));
     const balanceWrites = db.leaveBalance.update.mock.calls.length;
 
     await cancelLeave('leave-1');
@@ -584,7 +648,7 @@ describe('cancelLeave', () => {
     db.leave.findUnique.mockResolvedValue(leaveRow({ status: LeaveStatus.APPROVED }));
     db.academicYear.findFirst.mockResolvedValue({ id: 'ay-1' });
     db.leaveBalance.findUnique.mockResolvedValue({ id: 'bal-1' });
-    db.leave.update.mockResolvedValue(leaveRow({ status: LeaveStatus.CANCELLED }));
+    db.leave.findUniqueOrThrow.mockResolvedValue(leaveRow({ status: LeaveStatus.CANCELLED }));
     // Day 1 already held PRESENT (with a note) before the leave; day 2 was
     // created by it.
     db.staffAttendance.findMany.mockResolvedValue([
@@ -600,6 +664,12 @@ describe('cancelLeave', () => {
 
     await cancelLeave('leave-1');
 
+    // The move is guarded on the status the guard read, so a racing decision
+    // cannot be overwritten.
+    expect(db.leave.updateMany).toHaveBeenCalledWith({
+      where: { id: 'leave-1', status: LeaveStatus.APPROVED },
+      data: { status: LeaveStatus.CANCELLED },
+    });
     expect(db.leaveBalance.update).toHaveBeenCalledWith({
       where: { id: 'bal-1' },
       data: { usedDays: { decrement: 2 }, remainingDays: { increment: 2 } },
@@ -618,12 +688,23 @@ describe('cancelLeave', () => {
 
   it('does not touch the balance when cancelling a pending leave', async () => {
     db.leave.findUnique.mockResolvedValue(leaveRow({ status: LeaveStatus.PENDING }));
-    db.leave.update.mockResolvedValue(leaveRow({ status: LeaveStatus.CANCELLED }));
+    db.leave.findUniqueOrThrow.mockResolvedValue(leaveRow({ status: LeaveStatus.CANCELLED }));
 
     await cancelLeave('leave-1');
 
     expect(db.leaveBalance.update).not.toHaveBeenCalled();
     expect(db.staffAttendance.deleteMany).not.toHaveBeenCalled();
+    expect(db.staffAttendance.findMany).not.toHaveBeenCalled();
+  });
+
+  it('refuses a cancellation whose row was already decided by a concurrent request', async () => {
+    db.leave.findUnique.mockResolvedValue(leaveRow({ status: LeaveStatus.PENDING }));
+    // The guarded move matches nothing: another request decided the row first.
+    db.leave.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(cancelLeave('leave-1')).rejects.toThrow(/sudah diputuskan/i);
+
+    expect(db.leaveBalance.update).not.toHaveBeenCalled();
     expect(db.staffAttendance.findMany).not.toHaveBeenCalled();
   });
 });
