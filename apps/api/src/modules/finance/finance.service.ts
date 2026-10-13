@@ -24,7 +24,7 @@ import {
 import { seesAllUnits } from '@/utils/resolve-unit-id';
 import { CLASS_ENROLLMENT_STATUS, STUDENT_STATUS } from '@cipansor/shared';
 import { nisMapForUnit } from '@/utils/student-nis';
-import { wibMonthYear } from '@/utils/wib-day';
+import { wibMonthYear, wibMonthRange } from '@/utils/wib-day';
 
 // =====================================
 // PAYMENT TYPE SERVICE
@@ -1508,6 +1508,11 @@ export async function generateBulkSppInvoices(data: {
 
   const createdInvoices = [];
 
+  // The billed month as instants, so the idempotence guard below matches the
+  // same WIB window the reminder job uses (a `new Date(year, month, 1)` would
+  // read the server's timezone and miss an invoice due early on the 1st WIB).
+  const { start: monthStart, end: monthEnd } = wibMonthRange(year, month);
+
   for (const student of students) {
     // Check if invoice already exists for this student/month
     const existing = await prisma.invoice.findFirst({
@@ -1515,8 +1520,8 @@ export async function generateBulkSppInvoices(data: {
         studentId: student.id,
         paymentTypeId,
         dueDate: {
-          gte: new Date(year, month, 1),
-          lt: new Date(year, month + 1, 1),
+          gte: monthStart,
+          lt: monthEnd,
         },
       },
     });
@@ -1589,6 +1594,9 @@ export async function generateRecurringBills(at: Date = new Date()) {
     return { processed, created, skipped };
   }
 
+  // The billed month as instants, shared by every guard below.
+  const { start: monthStart, end: monthEnd } = wibMonthRange(year, month);
+
   // Process billing for each student matching payment types
   for (const student of activeStudents) {
     // Determine applicable payment types for this student (matching unitId)
@@ -1603,8 +1611,8 @@ export async function generateRecurringBills(at: Date = new Date()) {
           studentId: student.id,
           paymentTypeId: paymentType.id,
           dueDate: {
-            gte: new Date(year, month, 1),
-            lt: new Date(year, month + 1, 1),
+            gte: monthStart,
+            lt: monthEnd,
           },
         },
       });

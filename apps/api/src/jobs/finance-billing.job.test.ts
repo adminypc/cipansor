@@ -92,10 +92,16 @@ describe('runMonthlyAutoBilling bills the WIB calendar month', () => {
     vi.setSystemTime(new Date('2026-07-31T21:00:00Z'));
     await runMonthlyAutoBilling();
 
+    // Bounds are the WIB month as instants: 00:00 WIB on 1 August is
+    // 2026-07-31T17:00Z, not the `new Date(2026, 7, 1)` a UTC server resolves
+    // to (2026-08-01T00:00Z, i.e. 07:00 WIB).
     expect(prisma.invoice.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          dueDate: { gte: new Date(2026, 7, 1), lt: new Date(2026, 8, 1) },
+          dueDate: {
+            gte: new Date('2026-07-31T17:00:00.000Z'),
+            lt: new Date('2026-08-31T17:00:00.000Z'),
+          },
         }),
       })
     );

@@ -207,6 +207,43 @@ describe('generateBulkSppInvoices', () => {
       where: expect.objectContaining({ unitId: 'unit-1', status: 'active', deletedAt: null }),
     });
   });
+
+  it('queries the idempotence guard with WIB month bounds, not server-local ones', async () => {
+    // On a UTC server `new Date(2026, 7, 1)` is 2026-08-01T00:00Z = 07:00 WIB on
+    // the 1st, so an invoice due at 01:00 WIB on the 1st (2026-07-31T18:00Z) fell
+    // outside the guard: `!existing` was true and a re-run created a duplicate.
+    // The guard must use the same [00:00 WIB, next 00:00 WIB) band the reminder
+    // job uses — red before the fix, green after.
+    const prevTz = process.env.TZ;
+    process.env.TZ = 'UTC';
+    try {
+      (prisma.paymentType.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: 'pt-spp',
+        name: 'SPP',
+        amount: new Prisma.Decimal(350000),
+      });
+      (
+        prisma as unknown as { student: { findMany: ReturnType<typeof vi.fn> } }
+      ).student.findMany.mockResolvedValue([{ id: 'student-1', unitId: 'unit-1' }]);
+      vi.mocked(prisma.invoice.findFirst).mockResolvedValue(null);
+      vi.mocked(prisma.invoice.create).mockResolvedValue({ id: 'inv-1' } as any);
+
+      await financeService.generateBulkSppInvoices({
+        unitId: 'unit-1',
+        paymentTypeId: 'pt-spp',
+        year: 2026,
+        month: 7, // August
+      });
+
+      expect(vi.mocked(prisma.invoice.findFirst).mock.calls[0][0]?.where?.dueDate).toEqual({
+        gte: new Date('2026-07-31T17:00:00.000Z'),
+        lt: new Date('2026-08-31T17:00:00.000Z'),
+      });
+    } finally {
+      if (prevTz === undefined) delete process.env.TZ;
+      else process.env.TZ = prevTz;
+    }
+  });
 });
 
 // The billing screens read these four. They had no unit filter and returned

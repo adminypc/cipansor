@@ -121,6 +121,41 @@ describe('Finance Scheduler Unit Tests - Auto Billing', () => {
       }
     });
 
+    it('queries the idempotence guard with WIB month bounds, not server-local ones', async () => {
+      // Same defect as generateBulkSppInvoices: on a UTC server the guard's
+      // `new Date(year, month, 1)` starts the month at 07:00 WIB, so an invoice
+      // due early on the 1st WIB slips past `findFirst` and a re-run duplicates
+      // it. The guard must use the [00:00 WIB, next 00:00 WIB) band.
+      const prevTz = process.env.TZ;
+      process.env.TZ = 'UTC';
+      try {
+        vi.mocked(prisma.student.findMany).mockResolvedValue([
+          { id: 'student-1', unitId: 'unit-1', userId: 'user-1' } as any,
+        ]);
+        vi.mocked(prisma.paymentType.findMany).mockResolvedValue([
+          {
+            id: 'pt-spp',
+            code: 'SPP',
+            amount: new Prisma.Decimal(500000),
+            unitId: 'unit-1',
+            name: 'SPP',
+          } as any,
+        ]);
+        vi.mocked(prisma.invoice.findFirst).mockResolvedValue(null);
+        vi.mocked(prisma.invoice.create).mockResolvedValue({ id: 'inv-new' } as any);
+
+        await generateRecurringBills(new Date('2026-07-31T21:00:00Z')); // 1 Aug WIB
+
+        expect(vi.mocked(prisma.invoice.findFirst).mock.calls[0][0]?.where?.dueDate).toEqual({
+          gte: new Date('2026-07-31T17:00:00.000Z'),
+          lt: new Date('2026-08-31T17:00:00.000Z'),
+        });
+      } finally {
+        if (prevTz === undefined) delete process.env.TZ;
+        else process.env.TZ = prevTz;
+      }
+    });
+
     it('should skip invoice creation if already billed for the month', async () => {
       vi.mocked(prisma.student.findMany).mockResolvedValue([
         { id: 'student-1', unitId: 'unit-1', userId: 'user-1' } as any,
