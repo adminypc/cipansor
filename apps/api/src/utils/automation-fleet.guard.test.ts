@@ -449,26 +449,27 @@ describe('fleet contracts', () => {
 
   it('gets the basmalah into every main description, by template or workflow', () => {
     const arabic = 'بِسْمِ اللَّهِ الرَّحْمَنِ الرَّحِيمِ';
-    // The PR template carries it into the body: it is the first visible line,
-    // after the leading HTML comment the template opens with.
-    const pr = read(join(REPO_ROOT, '.github', 'pull_request_template.md'))
-      .replace(/<!--[\s\S]*?-->/g, '')
-      .split('\n')
-      .filter((l) => l.trim());
-    expect(pr[0].trim(), 'pull_request_template.md first visible line').toBe(arabic);
+    // The PR template carries it into the body: it sits in the preamble, before
+    // the first `## ` section (the template opens with an HTML comment, which
+    // renders as nothing).
+    const pr = read(join(REPO_ROOT, '.github', 'pull_request_template.md'));
+    const at = pr.indexOf(arabic);
+    expect(at, 'basmalah present in the PR template').toBeGreaterThanOrEqual(0);
+    expect(at, 'basmalah in the preamble, before the first section').toBeLessThan(
+      pr.indexOf('\n## ')
+    );
 
-    // An issue form cannot: its `markdown` block is preview only, so the line
-    // never lands in the body — the `Basmalah` workflow is what puts it there.
-    // The form only *shows* it, so the guard is that the workflow covers an
-    // issue opening, not that the form carries the line.
+    // An issue form cannot carry it: a form's `markdown` block is preview only,
+    // so the line never lands in the body — the `Basmalah` workflow is what puts
+    // it there. The form only *shows* it, so the guard is that the workflow
+    // covers an issue opening, not that the form carries the line.
     const wf = read(join(WORKFLOWS, 'basmalah.yml'));
     expect(wf).toMatch(/issues:[\s\S]*types:[\s\S]*opened/);
     for (const file of ['bug_report.yml', 'feature_request.yml']) {
       const form = read(join(REPO_ROOT, '.github', 'ISSUE_TEMPLATE', file));
       expect(form, `${file} shows the basmalah as a form prompt`).toContain(arabic);
-      // The basmalah must sit in a `type: markdown` block (a preview), never in
-      // a field that would land in the body — otherwise the claim it is "carried"
-      // would be false for that field.
+      // It must sit in a `type: markdown` block (a preview), never in a field
+      // that would land in the body — otherwise "carried" would be false.
       const before = form.slice(0, form.indexOf(arabic));
       const lastType = [...before.matchAll(/type:\s*(\S+)/g)].pop();
       expect(lastType?.[1], `${file} basmalah block type`).toBe('markdown');
