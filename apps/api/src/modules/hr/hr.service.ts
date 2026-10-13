@@ -2610,24 +2610,51 @@ export async function approveLeave(id: string, approverId: string, data: Approve
     teacherId: existing.teacherId ?? undefined,
   });
 
-  const dates: Date[] = [];
-  const currentDate = new Date(existing.startDate);
-  while (currentDate <= existing.endDate) {
-    dates.push(new Date(currentDate));
-    currentDate.setDate(currentDate.getDate() + 1);
-  }
-
   // Approval writes the status, the balance debit and every attendance day as
   // one unit. The status belongs in here too: written first and outside the
   // transaction, a failing attendance day rolled the debit back but left the
   // request APPROVED — a retry returned early at the guard above, and a later
   // cancellation credited days that were never spent.
+  // `approvedById` is the scalar side of the relation, so the claim uses the
+  // unchecked input (`updateMany` cannot `connect`).
+  const claimData: Prisma.LeaveUncheckedUpdateManyInput = {
+    status: data.status,
+    approvedById: approverId,
+    approvedAt: updateData.approvedAt,
+  };
+
   return prisma.$transaction(async (tx) => {
-    const leave = await tx.leave.update({
+    // Claim the decision with a compare-and-swap on the status. The guard above
+    // read the row outside the transaction, so a concurrent `updateLeave` may
+    // have changed the range since. Writing only while the row is still PENDING
+    // makes the winner the only writer: a request that was edited or cancelled
+    // in between makes the claim fail instead of being overwritten.
+    const claimed = await tx.leave.updateMany({
+      where: { id, status: LeaveStatus.PENDING },
+      data: claimData,
+    });
+    if (claimed.count === 0) {
+      throw Errors.conflict(
+        'Permintaan cuti sudah tidak berstatus menunggu; muat ulang sebelum mengambil keputusan.'
+      );
+    }
+
+    // Read the row back inside the transaction, after the claim, and build the
+    // attendance days from the dates actually stored. `dates` used to come from
+    // the pre-transaction snapshot, so an `updateLeave` that moved the range
+    // left the balance debited for the new `totalDays` while the *old* dates
+    // were marked LEAVE — days the person was not on leave.
+    const leave = await tx.leave.findUniqueOrThrow({
       where: { id },
-      data: updateData,
       include: { staff: true, teacher: true },
     });
+
+    const dates: Date[] = [];
+    const currentDate = new Date(leave.startDate);
+    while (currentDate <= leave.endDate) {
+      dates.push(new Date(currentDate));
+      currentDate.setDate(currentDate.getDate() + 1);
+    }
 
     // 1. Update Leave Balance
     const userId = leave.staff?.userId || leave.teacher?.userId;
