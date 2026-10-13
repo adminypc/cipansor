@@ -21,6 +21,19 @@ allowBuilds:
   '@scarf/scarf': false
   'core-js': false
 
+# pnpm 12's SECOND permission surface: a dependency that ships `skills/<name>/`
+# has it linked into the agent-skill directory after approval — install scripts
+# are governed by `allowBuilds`, skills are not. `allowBuilds` alone therefore
+# reads as the whole answer while covering only build scripts. Decide every
+# carrier here, like the build map above: `@tanstack/react-table` (a direct
+# `apps/web` dependency) ships three skills and is denied on purpose, so no
+# third-party skill content reaches `.claude/skills` (and its `.agents/skills`
+# symlink) where every agent reads it. A new carrier awaiting approval fails the
+# pnpm-supply-chain guard test.
+permissions:
+  '@tanstack/react-table':
+    skills: false
+
 # pnpm 12 no longer reads `pnpm.overrides` from package.json; they live here.
 overrides:
   qs: ^6.16.0

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { parse } from 'yaml';
@@ -21,6 +21,12 @@ import { parse } from 'yaml';
  * a pnpm that is older than the file assumes is exactly how the control goes
  * dead. Keep every pin equal to `packageManager`, and keep the workspace file
  * on the key that the pinned version honours.
+ *
+ * pnpm 12 adds a SECOND permission surface beside build scripts: a dependency
+ * that ships `skills/<name>/` is linked into `.claude/skills` after approval
+ * (`allowBuilds` does not govern it). Both surfaces must carry an explicit
+ * decision — see the `permissions` map — or one of them stays half-covered,
+ * which is the same defect this guard exists to stop.
  */
 
 const ROOT = resolve(__dirname, '..', '..', '..', '..');
@@ -146,6 +152,53 @@ describe('pnpm supply-chain control', () => {
     ).toBeGreaterThan(0);
   });
 
+  it("decides pnpm 12's second permission surface (agent skills), not just build scripts", () => {
+    // pnpm 12 links a dependency's `skills/<name>/` into `.claude/skills` once
+    // it is approved — a surface `allowBuilds` does not govern. Leaving it
+    // "awaiting approval" forever means no decision is ever taken for the
+    // third-party skill content every agent then reads, the same half-finished
+    // shape `onlyBuiltDependencies` had. The `permissions` map is where the
+    // decision lives; every package that ships skills needs an entry.
+    const permissions = workspace().permissions as
+      Record<string, Record<string, unknown>> | undefined;
+    expect(
+      permissions,
+      'pnpm-workspace.yaml must decide the agent-skills permission surface (`permissions`), or a carrier stays silently awaiting approval'
+    ).toBeTypeOf('object');
+
+    const nonBoolean = Object.entries(permissions ?? {})
+      .filter(([, entry]) => typeof (entry as Record<string, unknown>)?.skills !== 'boolean')
+      .map(([name]) => name);
+    expect(
+      nonBoolean,
+      'every permissions entry must set `skills` to a boolean (true grants, false denies)'
+    ).toEqual([]);
+  });
+
+  it('leaves no dependency permission awaiting approval (skills or build)', async () => {
+    // The authoritative answer, straight from the pinned pnpm. Static reading
+    // of `permissions` above cannot tell whether a NEW dependency started
+    // shipping skills; this does. `pnpm permissions list` needs no install —
+    // it reads the config — so it runs even when node_modules is absent.
+    const result = await permissionsList();
+    if (result === null) {
+      // pnpm is not resolvable in this process (not started through pnpm). The
+      // static assertion above still guards the config; say so rather than
+      // pass silently.
+      expect(workspace().permissions).toBeTruthy();
+      return;
+    }
+    expect(
+      result,
+      `a dependency permission is awaiting approval — decide it in pnpm-workspace.yaml -> permissions:\n${result}`
+    ).not.toMatch(/Awaiting approval/);
+    // And the scan is not blind: the output must be a real listing, or a
+    // pnpm that failed would read as "nothing awaiting".
+    expect(result, `could not read the permissions list:\n${result}`).toMatch(
+      /Granted:|Denied:|No packages have been/
+    );
+  });
+
   it('the lockfile is what pnpm 12 writes (packageManagerDependencies)', () => {
     // The pin moving into the lockfile is why `--frozen-lockfile` must be
     // regenerated in the same change: an old single-document lockfile fails
@@ -180,6 +233,33 @@ describe('pnpm supply-chain control', () => {
     expect(dead.allowBuilds).toBeUndefined();
   });
 });
+
+/**
+ * `pnpm permissions list` from the pinned pnpm, run from the repo root.
+ *
+ * `npm_execpath` is the pnpm binary when the suite was started through pnpm
+ * (`pnpm --filter api test` / `test:coverage`, i.e. CI and the documented
+ * local command); it is a plain `node` path under a bare `vitest run`. Either
+ * way this reads the config — no install, no network — and returns null when
+ * pnpm cannot be resolved, so the caller can fall back to the static check.
+ */
+function permissionsList(): Promise<string | null> {
+  const execpath = process.env.npm_execpath;
+  if (!execpath) return Promise.resolve(null);
+  // Under a bare `vitest run` (no pnpm wrapper) npm_execpath is node itself;
+  // there is no pnpm to ask, so fall back to the static check.
+  if (/(^|[/\\])node(\.exe)?$/.test(execpath)) return Promise.resolve(null);
+  // pnpm is a native binary here but a JS bundle under some setups (npm's
+  // pnpm/action-setup): run the latter through node rather than exec it.
+  const isScript = /\.(c?js|mjs)$/.test(execpath);
+  const command = isScript ? process.execPath : execpath;
+  const args = isScript ? [execpath, 'permissions', 'list'] : ['permissions', 'list'];
+  try {
+    return Promise.resolve(execFileSync(command, args, { cwd: ROOT, encoding: 'utf8' }));
+  } catch (err) {
+    return Promise.resolve(err instanceof Error ? err.message : String(err));
+  }
+}
 
 /**
  * Run the real `scripts/audit-deps.mjs` against a local stub of npm's bulk
