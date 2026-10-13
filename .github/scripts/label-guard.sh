@@ -64,19 +64,16 @@ fi
 # and `question` together, which makes the machine-readable state ambiguous).
 # `question`, `needs-info` and `pending-maintainer` all win over `ready`.
 #
-# This runs on every `labeled` event and has to compose with the standard path
-# below (which revokes the event's label when an unauthorized account applied
-# it):
-#   - the event label is one of the exclusions and the standard path will revoke
-#     it (human actor) -> that revocation resolves the conflict; leave `ready`;
-#   - otherwise, if `ready` coexists with an exclusion, `ready` is the defect to
-#     remove — whoever added it, and whether the event was `ready` itself or an
-#     unrelated label that merely happened to arrive while the conflict existed.
+# The decision is made from the issue's *effective* label set: the event's own
+# label counts unless the standard path below is about to revoke it (an
+# unauthorized actor applied a protected, non-human-decision label). Ignoring it
+# when it will be revoked is what lets the standard path's removal resolve a
+# conflict the event itself created — a human adding `question` beside `ready`
+# is resolved by removing `question`, not `ready`. But any exclusion still
+# present after that removal keeps the conflict, so `ready` must go: `ready` +
+# `needs-info` with a human adding `question` is still `ready` + `needs-info`.
 READY_MARK="<!-- label-guard:ready-exclusive -->"
-is_exclusion=0
-for excl in question needs-info pending-maintainer; do
-  [ "$LABEL" = "$excl" ] && is_exclusion=1
-done
+
 # Will the standard path revoke the event's own label (unauthorized actor,
 # protected, not a human-decision label)?
 revoke_event_label=0
@@ -93,14 +90,18 @@ if [ "$ACTOR" != "$BOT_LOGIN" ]; then
 fi
 
 current=$(gh api "repos/$REPO/issues/$NUMBER/labels" --jq '.[].name' 2>/dev/null || true)
+effective="$current"
+if [ "$revoke_event_label" = "1" ]; then
+  effective=$(printf '%s\n' "$current" | grep -vxF "$LABEL" || true)
+fi
+
 conflict=""
-if printf '%s\n' "$current" | grep -qxF ready; then
+if printf '%s\n' "$effective" | grep -qxF ready; then
   for excl in question needs-info pending-maintainer; do
-    printf '%s\n' "$current" | grep -qxF "$excl" && conflict="$excl"
+    printf '%s\n' "$effective" | grep -qxF "$excl" && conflict="$excl"
   done
 fi
-# The standard path resolves it only when it is about to remove an exclusion.
-if [ -n "$conflict" ] && ! { [ "$revoke_event_label" = "1" ] && [ "$is_exclusion" = "1" ]; }; then
+if [ -n "$conflict" ]; then
   if ! gh api -X DELETE "repos/$REPO/issues/$NUMBER/labels/ready" >/dev/null 2>&1; then
     echo "::error::Could not remove the contradictory 'ready' label from #$NUMBER."
     exit 1

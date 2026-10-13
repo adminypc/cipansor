@@ -15,9 +15,10 @@ import { join, resolve } from 'path';
  *  - `basmalah.sh` puts the basmalah at the top of a description and is
  *    idempotent.
  *
- * Plus the contracts the prompts and workflows share: the basmalah is in both
- * issue forms and the PR template, and the two scripts are wired into the
- * workflows that run them.
+ * Plus the contracts the prompts and workflows share: the PR template carries
+ * the basmalah into the body while an issue form only shows it (its `markdown`
+ * block is preview only, so the `Basmalah` workflow supplies it for issues), and
+ * the three scripts are wired into the workflows that run them.
  */
 const REPO_ROOT = resolve(__dirname, '..', '..', '..', '..');
 const LABEL_GUARD = join(REPO_ROOT, '.github', 'scripts', 'label-guard.sh');
@@ -256,6 +257,24 @@ describe('label-guard.sh', () => {
     expect(calls).toContain('/issues/7/labels/priority:high');
   });
 
+  it('removes `ready` when a second exclusion survives the event label', () => {
+    // The reviewer's scenario: `ready`+`needs-info` present, a human adds
+    // `question`. Revoking `question` does not clear `needs-info`, so the issue
+    // stays contradictory — `ready` must go too.
+    const { calls } = run(
+      LABEL_GUARD,
+      {
+        GH_STUB_LABELS: LABELS,
+        GH_STUB_PERM: 'admin',
+        GH_STUB_CURRENT: 'ready\nquestion\nneeds-info',
+      },
+      ['--stdin'],
+      labeledEvent('adminypc', 'question')
+    );
+    expect(calls).toContain('/issues/7/labels/ready');
+    expect(calls).toContain('/issues/7/labels/question');
+  });
+
   it('removes `ready` when a conflict exists and the event label is unrelated', () => {
     const { calls } = run(
       LABEL_GUARD,
@@ -428,12 +447,32 @@ describe('basmalah.sh', () => {
 describe('fleet contracts', () => {
   const read = (p: string) => readFileSync(p, 'utf8');
 
-  it('opens every issue form and the PR template with the basmalah', () => {
+  it('gets the basmalah into every main description, by template or workflow', () => {
     const arabic = 'بِسْمِ اللَّهِ الرَّحْمَنِ الرَّحِيمِ';
+    // The PR template carries it into the body: it is the first visible line,
+    // after the leading HTML comment the template opens with.
+    const pr = read(join(REPO_ROOT, '.github', 'pull_request_template.md'))
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .split('\n')
+      .filter((l) => l.trim());
+    expect(pr[0].trim(), 'pull_request_template.md first visible line').toBe(arabic);
+
+    // An issue form cannot: its `markdown` block is preview only, so the line
+    // never lands in the body — the `Basmalah` workflow is what puts it there.
+    // The form only *shows* it, so the guard is that the workflow covers an
+    // issue opening, not that the form carries the line.
+    const wf = read(join(WORKFLOWS, 'basmalah.yml'));
+    expect(wf).toMatch(/issues:[\s\S]*types:[\s\S]*opened/);
     for (const file of ['bug_report.yml', 'feature_request.yml']) {
-      expect(read(join(REPO_ROOT, '.github', 'ISSUE_TEMPLATE', file)), file).toContain(arabic);
+      const form = read(join(REPO_ROOT, '.github', 'ISSUE_TEMPLATE', file));
+      expect(form, `${file} shows the basmalah as a form prompt`).toContain(arabic);
+      // The basmalah must sit in a `type: markdown` block (a preview), never in
+      // a field that would land in the body — otherwise the claim it is "carried"
+      // would be false for that field.
+      const before = form.slice(0, form.indexOf(arabic));
+      const lastType = [...before.matchAll(/type:\s*(\S+)/g)].pop();
+      expect(lastType?.[1], `${file} basmalah block type`).toBe('markdown');
     }
-    expect(read(join(REPO_ROOT, '.github', 'pull_request_template.md'))).toContain(arabic);
   });
 
   it('wires the label guard, acknowledgement and basmalah into workflows', () => {

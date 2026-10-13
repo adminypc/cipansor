@@ -128,6 +128,10 @@ sync` workflow adds anything missing and **fails the check** when the type
    machine-readable state ambiguous (#814 carried `ready` and `question`
    together). The automations are told to criticize hard and ask probing
    questions until they are sure, precisely so `ready` is not applied early.
+   `label-guard.sh` enforces the exclusivity: it removes `ready` whenever it
+   still coexists with an exclusion once the event's own label is accounted for,
+   so a person adding a second exclusion beside an existing `ready` does not
+   leave the issue contradictory.
 
 9. **The final word lives in the description, not in the comments.** Triage,
    estimate, QA result, review verdict — everything a person has to act on — is
