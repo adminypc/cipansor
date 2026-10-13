@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { wibMonthYear, wibDate, utcMonthRange } from './wib-day';
+import { wibMonthYear, wibDate, wibDayDate, utcMonthRange } from './wib-day';
 
 // The WIB helpers must derive the calendar from the instant alone, never from
 // the host clock. Production runs the API container in UTC; a developer's
@@ -78,5 +78,39 @@ describe('utcMonthRange', () => {
     const { start, end } = utcMonthRange(2026, 11);
     expect(start.toISOString()).toBe('2026-12-01T00:00:00.000Z');
     expect(end.toISOString()).toBe('2027-01-01T00:00:00.000Z');
+  });
+});
+
+describe('wibDayDate', () => {
+  beforeAll(() => {
+    process.env.TZ = 'UTC';
+  });
+  afterAll(() => {
+    if (prevTz === undefined) delete process.env.TZ;
+    else process.env.TZ = prevTz;
+  });
+
+  it('normalizes any instant to the date-only value of its WIB day', () => {
+    // A UTC-midnight input stays put, a WIB-midnight one (17:00Z the day before)
+    // moves to the day WIB is on, and a mid-day instant lands on its WIB day.
+    expect(wibDayDate(new Date('2026-08-01T00:00:00.000Z')).toISOString()).toBe(
+      '2026-08-01T00:00:00.000Z'
+    );
+    expect(wibDayDate(new Date('2026-07-31T17:00:00.000Z')).toISOString()).toBe(
+      '2026-08-01T00:00:00.000Z'
+    );
+    expect(wibDayDate(new Date('2026-08-10T15:30:00.000Z')).toISOString()).toBe(
+      '2026-08-10T00:00:00.000Z'
+    );
+    // 2026-07-31 18:00Z is 1 August 01:00 WIB — the next WIB day, not July.
+    expect(wibDayDate(new Date('2026-07-31T18:00:00.000Z')).toISOString()).toBe(
+      '2026-08-01T00:00:00.000Z'
+    );
+  });
+
+  it('lands a first-of-month WIB day inside its own UTC-month bounds', () => {
+    const firstDay = wibDayDate(new Date('2026-07-31T17:00:00.000Z')); // 1 Aug WIB
+    const { start, end } = utcMonthRange(2026, 7);
+    expect(firstDay >= start && firstDay < end).toBe(true);
   });
 });

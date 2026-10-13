@@ -71,6 +71,18 @@ export function utcMonthRange(year: number, month: number): { start: Date; end: 
   };
 }
 
+/**
+ * The date-only value (midnight UTC) of the WIB calendar day an instant falls
+ * on. The single canonical form a `dueDate` may take, applied at every writer —
+ * the bulk/recurring generators already produce it, and the manual create/update
+ * paths are normalized through here — so an invoice's month can be derived from
+ * the value alone, whatever instant the caller supplied (`…T00:00:00Z`, or a
+ * WIB-midnight `…T00:00:00+07:00` reading as the previous UTC day).
+ */
+export function wibDayDate(moment: Date): Date {
+  return new Date(`${wibDayOf(moment)}T00:00:00.000Z`);
+}
+
 /** A `@db.Date` value as a date input shows it. */
 export function dayOf(date: Date | null): string | null {
   return date ? date.toISOString().slice(0, 10) : null;

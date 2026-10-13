@@ -180,6 +180,43 @@ describe('Finance Service Unit Tests', () => {
       const createArgs = vi.mocked(prisma.invoice.create).mock.calls[0][0];
       expect(Number(createArgs.data.amount)).toBe(250000);
     });
+
+    it('normalizes a supplied WIB-midnight due date to the date-only value of its WIB day', async () => {
+      // `createInvoice` preserves whatever instant a caller sends. A caller that
+      // means "1 August" as 00:00 WIB sends 2026-07-31T17:00Z, which on a UTC
+      // server reads as 31 July — outside August's UTC-month bounds, so the
+      // generator would bill it twice and the reminder would miss it. The writer
+      // stores the WIB calendar day instead.
+      vi.mocked(prisma.invoice.findFirst).mockResolvedValue(null);
+      vi.mocked(prisma.invoice.create).mockResolvedValue({
+        id: 'inv-3',
+        amount: new Prisma.Decimal(500000),
+        dueDate: new Date('2026-08-01T00:00:00.000Z'),
+        student: { user: { id: 'u1' } },
+        paymentType: { name: 'SPP' },
+      } as any);
+      vi.mocked(notificationService.createNotification).mockResolvedValue({} as any);
+
+      await financeService.createInvoice({
+        amount: 500000,
+        dueDate: '2026-07-31T17:00:00.000Z', // 1 August 00:00 WIB
+        studentId: 'stud-1',
+        paymentTypeId: 'pt-1',
+      } as any);
+
+      const createArgs = vi.mocked(prisma.invoice.create).mock.calls[0][0];
+      expect((createArgs.data.dueDate as Date).toISOString()).toBe('2026-08-01T00:00:00.000Z');
+    });
+
+    it('normalizes an update due date to the date-only value of its WIB day', async () => {
+      vi.mocked(prisma.invoice.update).mockResolvedValue({ id: 'inv-1' } as any);
+
+      await financeService.updateInvoice('inv-1', { dueDate: '2026-07-31T18:00:00.000Z' } as any);
+
+      const updateArgs = vi.mocked(prisma.invoice.update).mock.calls[0][0];
+      // 2026-07-31 18:00Z is 1 August 01:00 WIB.
+      expect((updateArgs.data.dueDate as Date).toISOString()).toBe('2026-08-01T00:00:00.000Z');
+    });
   });
 });
 
@@ -291,6 +328,72 @@ describe('generateBulkSppInvoices', () => {
       expect(stored).toHaveLength(1); // the rerun found the invoice, created none
       expect(second.created).toBe(0);
       expect(second.skipped).toBe(1);
+    } finally {
+      vi.mocked(prisma.invoice.findFirst).mockReset();
+      if (prevTz === undefined) delete process.env.TZ;
+      else process.env.TZ = prevTz;
+    }
+  });
+
+  it('finds a manually created first-day invoice and does not bill it again', async () => {
+    // The gate's scenario: a manual SPP invoice the caller meant as "1 August"
+    // (00:00 WIB = 2026-07-31T17:00Z). Before normalization that value was
+    // stored as-is and fell outside the guard's [2026-08-01Z, 2026-09-01Z)
+    // band, so August generation billed the student twice and the reminder
+    // missed the original. `createInvoice` now stores the WIB day, so the guard
+    // finds it.
+    const prevTz = process.env.TZ;
+    process.env.TZ = 'UTC';
+    try {
+      (prisma.paymentType.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: 'pt-spp',
+        name: 'SPP',
+        amount: new Prisma.Decimal(350000),
+      });
+      (
+        prisma as unknown as { student: { findMany: ReturnType<typeof vi.fn> } }
+      ).student.findMany.mockResolvedValue([{ id: 'student-1', unitId: 'unit-1' }]);
+      vi.mocked(prisma.scholarshipRecipient.findMany).mockResolvedValue([] as any);
+      vi.mocked(notificationService.createNotification).mockResolvedValue({} as any);
+
+      const stored: Array<{ dueDate: Date }> = [];
+      vi.mocked(prisma.invoice.create).mockImplementation((async ({ data }: any) => {
+        stored.push({ dueDate: data.dueDate });
+        return {
+          id: `inv-${stored.length}`,
+          amount: data.amount ?? new Prisma.Decimal(350000),
+          dueDate: data.dueDate,
+          student: { user: { id: 'u1' } },
+          paymentType: { name: 'SPP' },
+          ...data,
+        } as any;
+      }) as never);
+      vi.mocked(prisma.invoice.findFirst).mockImplementation((async ({ where }: any) => {
+        if (!where?.dueDate) return null; // generateInvoiceNumber's prefix lookup
+        const { gte, lt } = where.dueDate;
+        return stored.find((r) => r.dueDate >= gte && r.dueDate < lt) ?? null;
+      }) as never);
+
+      await financeService.createInvoice({
+        amount: 350000,
+        dueDate: '2026-07-31T17:00:00.000Z', // 1 August 00:00 WIB
+        studentId: 'student-1',
+        paymentTypeId: 'pt-spp',
+      } as any);
+      expect(stored).toHaveLength(1);
+      expect(stored[0].dueDate.toISOString()).toBe('2026-08-01T00:00:00.000Z');
+
+      const result = await financeService.generateBulkSppInvoices({
+        unitId: 'unit-1',
+        paymentTypeId: 'pt-spp',
+        year: 2026,
+        month: 7, // August
+        dueDay: 1,
+      });
+
+      expect(stored).toHaveLength(1); // the guard found the manual invoice
+      expect(result.created).toBe(0);
+      expect(result.skipped).toBe(1);
     } finally {
       vi.mocked(prisma.invoice.findFirst).mockReset();
       if (prevTz === undefined) delete process.env.TZ;

@@ -24,7 +24,7 @@ import {
 import { seesAllUnits } from '@/utils/resolve-unit-id';
 import { CLASS_ENROLLMENT_STATUS, STUDENT_STATUS } from '@cipansor/shared';
 import { nisMapForUnit } from '@/utils/student-nis';
-import { wibMonthYear, wibDate, utcMonthRange } from '@/utils/wib-day';
+import { wibMonthYear, wibDate, wibDayDate, utcMonthRange } from '@/utils/wib-day';
 
 // =====================================
 // PAYMENT TYPE SERVICE
@@ -191,7 +191,7 @@ export async function createInvoice(data: CreateInvoiceDto, tx?: Prisma.Transact
           ...invoiceData,
           invoiceNumber,
           amount: finalAmount.lt(0) ? 0 : finalAmount,
-          dueDate: new Date(data.dueDate),
+          dueDate: wibDayDate(new Date(data.dueDate)),
           student: { connect: { id: studentId } },
           paymentType: { connect: { id: paymentTypeId } },
         },
@@ -392,7 +392,7 @@ export async function updateInvoice(id: string, data: UpdateInvoiceDto) {
     data: {
       ...data,
       ...(data.amount && { amount: new Prisma.Decimal(data.amount) }),
-      ...(data.dueDate && { dueDate: new Date(data.dueDate) }),
+      ...(data.dueDate && { dueDate: wibDayDate(new Date(data.dueDate)) }),
     },
     include: {
       student: {
