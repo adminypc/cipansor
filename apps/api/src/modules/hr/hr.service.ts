@@ -2602,40 +2602,7 @@ export async function approveLeave(id: string, approverId: string, data: Approve
 
   // If approved, mark staff/teacher attendance as LEAVE for those days
   if (data.status === LeaveStatus.APPROVED) {
-    // 1. Update Leave Balance
     const userId = leave.staff?.userId || leave.teacher?.userId;
-    if (userId) {
-      // Find relevant academic year for the leave start date
-      const academicYear = await prisma.academicYear.findFirst({
-        where: {
-          startDate: { lte: leave.startDate },
-          endDate: { gte: leave.endDate },
-        },
-      });
-
-      if (academicYear) {
-        // Update balance if exists
-        const balance = await prisma.leaveBalance.findUnique({
-          where: {
-            userId_academicYearId_leaveType: {
-              userId,
-              academicYearId: academicYear.id,
-              leaveType: leave.type,
-            },
-          },
-        });
-
-        if (balance) {
-          await prisma.leaveBalance.update({
-            where: { id: balance.id },
-            data: {
-              usedDays: { increment: leave.totalDays },
-              remainingDays: { decrement: leave.totalDays },
-            },
-          });
-        }
-      }
-    }
 
     // Mark each day of the leave. Keyed on staffId now, so a teacher's leave
     // lands on the same row as their clock-ins.
@@ -2651,10 +2618,48 @@ export async function approveLeave(id: string, approverId: string, data: Approve
       currentDate.setDate(currentDate.getDate() + 1);
     }
 
+    // The balance decrement and the per-day attendance writes share one
+    // transaction: if any day refuses, neither lands. Before this they were
+    // separate, so a failing attendance write left the balance already spent.
     // Mark each day LEAVE, but remember what the row held: a day the person
     // already clocked in keeps its evidence, and a later cancellation restores
     // it rather than deleting a day they actually attended.
     await prisma.$transaction(async (tx) => {
+      // 1. Update Leave Balance
+      if (userId) {
+        // Find relevant academic year for the leave start date
+        const academicYear = await tx.academicYear.findFirst({
+          where: {
+            startDate: { lte: leave.startDate },
+            endDate: { gte: leave.endDate },
+          },
+        });
+
+        if (academicYear) {
+          // Update balance if exists
+          const balance = await tx.leaveBalance.findUnique({
+            where: {
+              userId_academicYearId_leaveType: {
+                userId,
+                academicYearId: academicYear.id,
+                leaveType: leave.type,
+              },
+            },
+          });
+
+          if (balance) {
+            await tx.leaveBalance.update({
+              where: { id: balance.id },
+              data: {
+                usedDays: { increment: leave.totalDays },
+                remainingDays: { decrement: leave.totalDays },
+              },
+            });
+          }
+        }
+      }
+
+      // 2. Mark each day LEAVE
       for (const date of dates) {
         const existing = await tx.staffAttendance.findUnique({
           where: { staffId_date: { staffId: targetStaffId, date } },

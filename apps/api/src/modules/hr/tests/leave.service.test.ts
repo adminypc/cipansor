@@ -1,17 +1,40 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { LeaveStatus, LeaveType, StaffAttendanceStatus } from '@prisma/client';
 
-// `prisma` is fully mocked. `$transaction` is mocked to imitate Prisma: the
-// callback form runs against the same client (Prisma passes the callback a
-// transaction client), and the array form is sequential — an earlier rejection
-// stops the remaining promises, exactly as the real client does. A faithful
-// array form is what lets a test prove that no partial write survives a
-// mid-transaction failure; `Promise.all` would hide it by running every promise
-// concurrently and ignoring the ones that settle after the first rejection.
-const { prismaMock, runTransaction } = vi.hoisted(() => {
-  const runTransaction = async (arg: unknown, client: Record<string, unknown>) => {
+// `prisma` is fully mocked. Two helpers keep the mock faithful to Prisma:
+//
+//  * `lazy(impl)` returns a thenable whose body runs only when it is awaited.
+//    Prisma's array `$transaction([...])` receives *operations that have not run
+//    yet*; a `mockResolvedValue` call, by contrast, executes at call time, so a
+//    test counting writes cannot tell "the operation ran" from "the operation
+//    was merely constructed". Handing the array `lazy(...)` writes and counting
+//    inside `impl` is what makes the count mean execution.
+//  * the callback form runs against a client snapshot and restores it if the
+//    callback throws — the closest a mock can get to a real transaction, and
+//    enough to prove that no partial write survives a mid-transaction failure.
+const { prismaMock, runTransaction, lazy } = vi.hoisted(() => {
+  /** A thenable Prisma-style operation that runs `impl` only when awaited. */
+  const lazy = <T>(impl: () => T | Promise<T>) => ({
+    then: (onFulfilled: (v: T) => unknown, onRejected?: (e: unknown) => unknown) =>
+      Promise.resolve().then(impl).then(onFulfilled, onRejected),
+  });
+
+  const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+
+  const runTransaction = async (arg: unknown, client: Record<string, any>): Promise<unknown> => {
     if (typeof arg === 'function') {
-      return (arg as (tx: unknown) => unknown)(client);
+      // `__store` is the in-memory state the write mocks mutate (a real
+      // transaction writes to the DB and rolls it back). Snapshot it before the
+      // callback and put it back if the callback throws, so a test can observe
+      // that a failed transaction changed nothing.
+      const store = client.__store;
+      const snapshot = store ? clone(store) : undefined;
+      try {
+        return await (arg as (tx: typeof client) => unknown)(client);
+      } catch (error) {
+        if (snapshot !== undefined) client.__store = snapshot;
+        throw error;
+      }
     }
     // Prisma's array form issues the operations in order and stops at the
     // first rejection; it never reports a later operation as done.
@@ -22,7 +45,7 @@ const { prismaMock, runTransaction } = vi.hoisted(() => {
     return results;
   };
 
-  const prismaMock: Record<string, unknown> = {
+  const prismaMock: Record<string, any> = {
     leave: {
       findFirst: vi.fn(),
       findUnique: vi.fn(),
@@ -50,11 +73,12 @@ const { prismaMock, runTransaction } = vi.hoisted(() => {
     },
     auditLog: { create: vi.fn() },
     $transaction: vi.fn(),
+    // Emulated row store: write mocks mutate it, `runTransaction` snapshots and
+    // restores it, so a test can read the effect of a failed transaction.
+    __store: { attendance: [] as unknown[], balanceUpdated: false },
   };
-  (prismaMock.$transaction as ReturnType<typeof vi.fn>).mockImplementation((arg: unknown) =>
-    runTransaction(arg, prismaMock)
-  );
-  return { prismaMock, runTransaction };
+  prismaMock.$transaction.mockImplementation((arg: unknown) => runTransaction(arg, prismaMock));
+  return { prismaMock, runTransaction, lazy };
 });
 
 vi.mock('../../../lib/prisma', () => ({ prisma: prismaMock }));
@@ -65,6 +89,7 @@ import {
   cancelLeave,
   deleteLeave,
   getLeaveBalance,
+  getStaffAttendanceSummary,
 } from '../hr.service';
 
 const db = prismaMock as {
@@ -78,6 +103,7 @@ const db = prismaMock as {
   staffAttendance: Record<string, ReturnType<typeof vi.fn>>;
   auditLog: { create: ReturnType<typeof vi.fn> };
   $transaction: ReturnType<typeof vi.fn>;
+  __store: { attendance: unknown[]; balanceUpdated: boolean };
 };
 
 const STAFF = '11111111-1111-4111-8111-111111111111';
@@ -107,6 +133,8 @@ beforeEach(() => {
   db.leaveBalance.findUnique.mockResolvedValue(null);
   db.leaveBalance.findMany.mockResolvedValue([]);
   db.leaveTypeConfig.findUnique.mockResolvedValue(null);
+  db.__store.attendance = [];
+  db.__store.balanceUpdated = false;
   db.leave.create.mockImplementation(async ({ data }: { data: unknown }) => ({
     id: 'leave-1',
     ...(data as object),
@@ -290,7 +318,7 @@ describe('createLeave', () => {
     );
   });
 
-  it('leaves no leave row behind when the create inside the transaction fails', async () => {
+  it('propagates a create failure from inside the transaction', async () => {
     let created = false;
     db.leave.create.mockImplementation(async () => {
       created = true;
@@ -307,18 +335,15 @@ describe('createLeave', () => {
       })
     ).rejects.toThrow(/duplicate key/);
 
-    // The callback form runs against the mocked client, so a failure inside the
-    // transaction is not swallowed into a *successful* create.
+    // The mocked create ran but has no store and no rollback, so this pins only
+    // that the failure is propagated, not that a row was left behind.
     expect(created).toBe(true);
     expect(db.leave.create).toHaveBeenCalledTimes(1);
   });
 });
 
 describe('$transaction mock', () => {
-  // The helper is what stands in for Prisma, so a test pins its array form: it
-  // must await each operation in order, not fan them out. A later edit that
-  // swapped the loop for `Promise.all` would let a rejected mid-transaction
-  // operation be ignored — the exact partial-write the leave tests rely on.
+  // The helper stands in for Prisma, so tests pin its two shapes directly.
   type LazyOp = {
     then: (
       onFulfilled: (value: unknown) => unknown,
@@ -346,11 +371,44 @@ describe('$transaction mock', () => {
     expect(started).toEqual(['op1', 'bail']);
   });
 
-  it('runs the callback form against the transaction client it is given', async () => {
-    const client = { marker: true } as Record<string, unknown>;
-    const seen = await runTransaction((tx: unknown) => tx, client);
-    expect(seen).toBe(client);
-    expect(seen).not.toBe(prismaMock);
+  it('does not execute a lazy operation until it is awaited', async () => {
+    let ran = false;
+    const op = lazy(() => {
+      ran = true;
+      return 'done';
+    });
+
+    // Merely constructing the thenable must not run `impl`; a `mockResolvedValue`
+    // call would already have executed it by now.
+    expect(ran).toBe(false);
+    await expect(op).resolves.toBe('done');
+    expect(ran).toBe(true);
+  });
+
+  it('runs the callback form against a client it restores when the callback throws', async () => {
+    const client = { __store: { attendance: [] as unknown[] } };
+    const seen = await runTransaction(
+      (tx: typeof client) => {
+        tx.__store.attendance.push('day-1');
+        return tx.__store.attendance.length;
+      },
+      client as unknown as Record<string, any>
+    );
+    expect(seen).toBe(1);
+    // A successful callback keeps what it wrote.
+    expect(client.__store.attendance).toEqual(['day-1']);
+
+    // A throw inside the callback leaves the store exactly as it was.
+    await expect(
+      runTransaction(
+        (tx: typeof client) => {
+          tx.__store.attendance.push('day-2', 'day-3');
+          throw new Error('boom');
+        },
+        client as unknown as Record<string, any>
+      )
+    ).rejects.toThrow(/boom/);
+    expect(client.__store.attendance).toEqual(['day-1']);
   });
 });
 
@@ -442,27 +500,50 @@ describe('approveLeave', () => {
     expect(db.auditLog.create).toHaveBeenCalledTimes(1);
   });
 
-  it('stops marking attendance at the day that refuses, so no later write is reported done', async () => {
+  it('rolls back the whole approval when the last attendance day refuses', async () => {
     db.leave.findUnique.mockResolvedValue(leaveRow({ status: LeaveStatus.PENDING }));
-    db.leave.update.mockResolvedValue(leaveRow({ status: LeaveStatus.APPROVED }));
+    // A 3-day leave: day 1 and day 2 write, day 3 refuses.
+    db.leave.update.mockResolvedValue(
+      leaveRow({
+        status: LeaveStatus.APPROVED,
+        startDate: new Date('2026-01-05T00:00:00.000Z'),
+        endDate: new Date('2026-01-07T00:00:00.000Z'),
+        totalDays: 3,
+      })
+    );
     db.academicYear.findFirst.mockResolvedValue({ id: 'ay-1' });
     db.leaveBalance.findUnique.mockResolvedValue({ id: 'bal-1' });
     db.staffAttendance.findUnique.mockResolvedValue(null);
-    // Day 1 writes; day 2 refuses — as a real day inside `$transaction` would.
-    db.staffAttendance.create
-      .mockResolvedValueOnce({ id: 'att-1' })
-      .mockRejectedValueOnce(new Error('deadlock'));
+
+    // The writes are lazy: `impl` runs only when awaited, and it records its
+    // effect in `__store` just as a real write would touch the DB. A lazy
+    // operation that is never awaited writes nothing.
+    let attempted = 0;
+    db.staffAttendance.create.mockImplementation(() =>
+      lazy(() => {
+        attempted += 1;
+        if (attempted === 3) throw new Error('deadlock');
+        db.__store.attendance.push({ day: attempted });
+        return { id: `att-${attempted}` };
+      })
+    );
+    db.leaveBalance.update.mockImplementation(() =>
+      lazy(() => {
+        db.__store.balanceUpdated = true;
+        return { id: 'bal-1' };
+      })
+    );
 
     await expect(
       approveLeave('leave-1', 'approver-1', { status: LeaveStatus.APPROVED })
     ).rejects.toThrow(/deadlock/);
 
-    // The loop ran day 1 then day 2 and stopped: day 2 was attempted, and the
-    // transaction never reported a third day.
-    expect(db.staffAttendance.create).toHaveBeenCalledTimes(2);
-    // The balance update sits outside the attendance transaction and did run —
-    // this is what a cancel must rectify, and the test pins that shape.
-    expect(db.leaveBalance.update).toHaveBeenCalledTimes(1);
+    // Day 3 was attempted, no fourth day followed.
+    expect(attempted).toBe(3);
+    // The transaction rolled back: neither the balance decrement nor the two
+    // attendance writes that ran before the failure survive.
+    expect(db.__store.balanceUpdated).toBe(false);
+    expect(db.__store.attendance).toEqual([]);
     // The audit trail is written only after the transaction succeeds.
     expect(db.auditLog.create).not.toHaveBeenCalled();
   });
@@ -599,10 +680,18 @@ describe('getLeaveBalance', () => {
   it('reports the full quota when the fallback yields no leaves for the year', async () => {
     db.user.findUnique.mockResolvedValue({ id: 'user-2' });
     db.academicYear.findFirst.mockResolvedValue(null);
-    // No parameterless rows: the fixture refuses to answer unless the query
-    // names this employee, so `remainingAnnual: 12` here proves the filter was
-    // applied and simply found nothing.
-    db.leave.findMany.mockResolvedValue([]);
+    // Argument-aware, and it answers with rows when the query does *not* name
+    // this employee: a fallback that skipped the filter would receive those
+    // rows and report 3 used / 9 remaining, not the empty-branch 0 / 12.
+    db.leave.findMany.mockImplementation(async (args: { where?: { OR?: unknown[] } }) => {
+      const or = args?.where?.OR ?? [];
+      const matches = or.some(
+        (c) =>
+          (c as { staffId?: string }).staffId === 'user-2' ||
+          (c as { teacherId?: string }).teacherId === 'user-2'
+      );
+      return matches ? [] : [{ type: LeaveType.ANNUAL, totalDays: 9 }];
+    });
 
     const result = await getLeaveBalance('user-2', 2026);
 
@@ -624,5 +713,23 @@ describe('getLeaveBalance', () => {
 
     expect(result.annualQuota).toBe(14);
     expect(result.remainingAnnual).toBe(14);
+  });
+});
+
+describe('getStaffAttendanceSummary unit scope', () => {
+  it('forbids a unit admin from reading another unit\u2019s staff summary', async () => {
+    db.staff.findUnique.mockResolvedValue({ unitId: 'unit-2' });
+
+    await expect(getStaffAttendanceSummary('staff-1', 3, 2026, 'unit-1')).rejects.toThrow(
+      /di luar unit/i
+    );
+  });
+
+  it('allows the summary for staff in the admin\u2019s own unit', async () => {
+    db.staff.findUnique.mockResolvedValue({ unitId: 'unit-1' });
+    db.staffAttendance.findMany.mockResolvedValue([]);
+
+    const summary = await getStaffAttendanceSummary('staff-1', 3, 2026, 'unit-1');
+    expect(summary.staffId).toBe('staff-1');
   });
 });
