@@ -89,6 +89,11 @@
       pertanyaan terbuka; tidak pernah bersama `question`/`needs-info`/
       `pending-maintainer` (#814). Kritik habis-habisan dulu, baru `ready`.
       `label-guard.sh` mencabut `ready` yang bertentangan, dari akun mana pun.
+      Konflik dihitung dari himpunan label **efektif**: label pada event
+      diabaikan hanya bila jalur standar memang akan mencabutnya, sehingga
+      exclusion **lain** yang tersisa (mis. `ready`+`needs-info` saat manusia
+      menambah `question`) tetap membuat `ready` dicabut (temuan tinjauan
+      PR #817, 2026-10-13).
     - **Hanya `cipansor-bot` melabeli.** Label yang dipasang akun lain dicabut
       `label-guard.yml` dan pelakunya diberi tahu sekali; label keputusan
       manusia (`rilis-disetujui`, `rilis-ditolak`, `bot-implement`) tetap boleh

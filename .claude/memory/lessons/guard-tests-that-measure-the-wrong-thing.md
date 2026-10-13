@@ -282,3 +282,30 @@ nothing.
 The same font, embedded whole, drew Latin text with gaps ("( RAPORT)"). Amiri
 is an Arabic font, and its Latin advances depend on positioning rules that
 pdf-lib does not apply. Use a font designed for the script being printed.
+
+## A guard for "it is carried" that only checked presence
+
+The basmalah contract test read both issue forms and the PR template and
+asserted each `toContain` the Arabic line. Green — but for the issue forms it
+was green for the wrong reason: a form's `type: markdown` block is preview
+only and never lands in the body, so the forms **show** the basmalah without
+*carrying* it; the `Basmalah` workflow is what puts it in the body. The
+assertion could not tell "carried" from "displayed", and the doc that said the
+forms carry it was wrong in the same direction. (Found by a reviewer, PR #817,
+2026-10-13.) Measure the mechanism: the PR template carries it (assert its
+position in the preamble, before the first `## ` section), an issue form only
+previews it (assert the line sits in a `type: markdown` block — a field would
+be a defect), and the workflow covers `issues.opened`.
+
+## A guard that skipped the root of the chain it guards
+
+`label-guard.sh` removed a `ready` that contradicted an exclusion, but decided
+the conflict from the raw label set and let one early exit stand in for the
+whole decision: when the *event's own* label was an exclusion the standard path
+would revoke, it left `ready` untouched — correct only if that was the **only**
+exclusion. With `ready` + `needs-info` present and a human adding `question`,
+revoking `question` left `ready` + `needs-info`, still contradictory. (Reviewer,
+PR #817, 2026-10-13.) The fix computes the conflict from the **effective** set —
+the event's label ignored only when it will actually be revoked — and asserts
+the two-exclusion case, not just the single one. When a decision has an
+exception, the guard must exercise the state *after* the exception is applied.
