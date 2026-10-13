@@ -137,11 +137,12 @@ describe('a push that lands on main is refused', () => {
   });
 
   // A substitution in the destination position hides where the push lands
-  // (#660 review round 2, #788). The tokenizer splits `$( … )` and backticks out
-  // of the word, so `main` no longer sits in the refspec slot; every positional
-  // argument is scanned for an unresolved expansion instead. The guard cannot
-  // evaluate the expansion, so it fails closed — the destination is refused
-  // whether it sits in the remote slot or the refspec slot.
+  // (#660 review round 2, #788). The tokenizer splits `$( … )` out of the word
+  // — `(`/`)` are punctuation — leaving a bare `$` among the push's arguments;
+  // a backtick is deliberately kept inside its word (`PUNCT` excludes it), so
+  // the word still carries it. Either way the expansion is unresolved, so every
+  // positional argument is scanned and the guard fails closed — the destination
+  // is refused whether it sits in the remote slot or the refspec slot.
   it.each([
     'git push $(echo origin) main',
     'git push `echo origin` main',
