@@ -2594,108 +2594,116 @@ export async function approveLeave(id: string, approverId: string, data: Approve
     updateData.rejectedNote = data.rejectedNote;
   }
 
-  const leave = await prisma.leave.update({
-    where: { id },
-    data: updateData,
-    include: { staff: true, teacher: true },
+  // A rejection changes only the row; it has no side effects to keep in step.
+  if (data.status !== LeaveStatus.APPROVED) {
+    return prisma.leave.update({
+      where: { id },
+      data: updateData,
+      include: { staff: true, teacher: true },
+    });
+  }
+
+  // Mark each day of the leave. Keyed on staffId now, so a teacher's leave
+  // lands on the same row as their clock-ins.
+  const targetStaffId = await resolveStaffId({
+    staffId: existing.staffId ?? undefined,
+    teacherId: existing.teacherId ?? undefined,
   });
 
-  // If approved, mark staff/teacher attendance as LEAVE for those days
-  if (data.status === LeaveStatus.APPROVED) {
-    const userId = leave.staff?.userId || leave.teacher?.userId;
+  const dates: Date[] = [];
+  const currentDate = new Date(existing.startDate);
+  while (currentDate <= existing.endDate) {
+    dates.push(new Date(currentDate));
+    currentDate.setDate(currentDate.getDate() + 1);
+  }
 
-    // Mark each day of the leave. Keyed on staffId now, so a teacher's leave
-    // lands on the same row as their clock-ins.
-    const targetStaffId = await resolveStaffId({
-      staffId: leave.staffId ?? undefined,
-      teacherId: leave.teacherId ?? undefined,
+  // Approval writes the status, the balance debit and every attendance day as
+  // one unit. The status belongs in here too: written first and outside the
+  // transaction, a failing attendance day rolled the debit back but left the
+  // request APPROVED — a retry returned early at the guard above, and a later
+  // cancellation credited days that were never spent.
+  return prisma.$transaction(async (tx) => {
+    const leave = await tx.leave.update({
+      where: { id },
+      data: updateData,
+      include: { staff: true, teacher: true },
     });
 
-    const dates: Date[] = [];
-    const currentDate = new Date(leave.startDate);
-    while (currentDate <= leave.endDate) {
-      dates.push(new Date(currentDate));
-      currentDate.setDate(currentDate.getDate() + 1);
-    }
+    // 1. Update Leave Balance
+    const userId = leave.staff?.userId || leave.teacher?.userId;
+    if (userId) {
+      // Find relevant academic year for the leave start date
+      const academicYear = await tx.academicYear.findFirst({
+        where: {
+          startDate: { lte: leave.startDate },
+          endDate: { gte: leave.endDate },
+        },
+      });
 
-    // The balance decrement and the per-day attendance writes share one
-    // transaction: if any day refuses, neither lands. Before this they were
-    // separate, so a failing attendance write left the balance already spent.
-    // Mark each day LEAVE, but remember what the row held: a day the person
-    // already clocked in keeps its evidence, and a later cancellation restores
-    // it rather than deleting a day they actually attended.
-    await prisma.$transaction(async (tx) => {
-      // 1. Update Leave Balance
-      if (userId) {
-        // Find relevant academic year for the leave start date
-        const academicYear = await tx.academicYear.findFirst({
+      if (academicYear) {
+        // Update balance if exists
+        const balance = await tx.leaveBalance.findUnique({
           where: {
-            startDate: { lte: leave.startDate },
-            endDate: { gte: leave.endDate },
+            userId_academicYearId_leaveType: {
+              userId,
+              academicYearId: academicYear.id,
+              leaveType: leave.type,
+            },
           },
         });
 
-        if (academicYear) {
-          // Update balance if exists
-          const balance = await tx.leaveBalance.findUnique({
-            where: {
-              userId_academicYearId_leaveType: {
-                userId,
-                academicYearId: academicYear.id,
-                leaveType: leave.type,
-              },
+        if (balance) {
+          await tx.leaveBalance.update({
+            where: { id: balance.id },
+            data: {
+              usedDays: { increment: leave.totalDays },
+              remainingDays: { decrement: leave.totalDays },
             },
           });
-
-          if (balance) {
-            await tx.leaveBalance.update({
-              where: { id: balance.id },
-              data: {
-                usedDays: { increment: leave.totalDays },
-                remainingDays: { decrement: leave.totalDays },
-              },
-            });
-          }
         }
       }
+    }
 
-      // 2. Mark each day LEAVE
-      for (const date of dates) {
-        const existing = await tx.staffAttendance.findUnique({
-          where: { staffId_date: { staffId: targetStaffId, date } },
-          select: { id: true, status: true, notes: true, leaveRequestId: true },
+    // 2. Mark each day LEAVE, but remember what the row held: a day the person
+    // already clocked in keeps its evidence, and a later cancellation restores
+    // it rather than deleting a day they actually attended.
+    for (const date of dates) {
+      const existingAttendance = await tx.staffAttendance.findUnique({
+        where: { staffId_date: { staffId: targetStaffId, date } },
+        select: { id: true, status: true, notes: true, leaveRequestId: true },
+      });
+      if (existingAttendance) {
+        // A day already carrying this leave is idempotent; a day carrying a
+        // *different* approved leave is left to that leave's own bookkeeping.
+        if (existingAttendance.leaveRequestId && existingAttendance.leaveRequestId !== id) {
+          continue;
+        }
+        await tx.staffAttendance.update({
+          where: { id: existingAttendance.id },
+          data: {
+            status: StaffAttendanceStatus.LEAVE,
+            notes: `Cuti: ${leave.type}`,
+            leaveRequestId: id,
+            leavePreviousStatus: existingAttendance.status,
+            // Keep the original explanation so cancelling restores it rather
+            // than wiping a recorded reason.
+            leavePreviousNotes: existingAttendance.notes,
+          },
         });
-        if (existing) {
-          // A day already carrying this leave is idempotent; a day carrying a
-          // *different* approved leave is left to that leave's own bookkeeping.
-          if (existing.leaveRequestId && existing.leaveRequestId !== id) continue;
-          await tx.staffAttendance.update({
-            where: { id: existing.id },
-            data: {
-              status: StaffAttendanceStatus.LEAVE,
-              notes: `Cuti: ${leave.type}`,
-              leaveRequestId: id,
-              leavePreviousStatus: existing.status,
-              // Keep the original explanation so cancelling restores it rather
-              // than wiping a recorded reason.
-              leavePreviousNotes: existing.notes,
-            },
-          });
-        } else {
-          await tx.staffAttendance.create({
-            data: {
-              staffId: targetStaffId,
-              date,
-              status: StaffAttendanceStatus.LEAVE,
-              notes: `Cuti: ${leave.type}`,
-              leaveRequestId: id,
-            },
-          });
-        }
+      } else {
+        await tx.staffAttendance.create({
+          data: {
+            staffId: targetStaffId,
+            date,
+            status: StaffAttendanceStatus.LEAVE,
+            notes: `Cuti: ${leave.type}`,
+            leaveRequestId: id,
+          },
+        });
       }
-    });
+    }
 
-    await prisma.auditLog.create({
+    await tx.auditLog.create({
       data: {
         userId: approverId,
         action: 'APPROVE',
@@ -2704,9 +2712,9 @@ export async function approveLeave(id: string, approverId: string, data: Approve
         newValues: { status: data.status, type: leave.type, totalDays: leave.totalDays },
       },
     });
-  }
 
-  return leave;
+    return leave;
+  });
 }
 
 export async function cancelLeave(id: string) {

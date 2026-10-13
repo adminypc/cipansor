@@ -75,7 +75,11 @@ const { prismaMock, runTransaction, lazy } = vi.hoisted(() => {
     $transaction: vi.fn(),
     // Emulated row store: write mocks mutate it, `runTransaction` snapshots and
     // restores it, so a test can read the effect of a failed transaction.
-    __store: { attendance: [] as unknown[], balanceUpdated: false },
+    __store: {
+      attendance: [] as unknown[],
+      balanceUpdated: false,
+      leaveStatus: '' as string,
+    },
   };
   prismaMock.$transaction.mockImplementation((arg: unknown) => runTransaction(arg, prismaMock));
   return { prismaMock, runTransaction, lazy };
@@ -103,7 +107,7 @@ const db = prismaMock as {
   staffAttendance: Record<string, ReturnType<typeof vi.fn>>;
   auditLog: { create: ReturnType<typeof vi.fn> };
   $transaction: ReturnType<typeof vi.fn>;
-  __store: { attendance: unknown[]; balanceUpdated: boolean };
+  __store: { attendance: unknown[]; balanceUpdated: boolean; leaveStatus: string };
 };
 
 const STAFF = '11111111-1111-4111-8111-111111111111';
@@ -135,6 +139,7 @@ beforeEach(() => {
   db.leaveTypeConfig.findUnique.mockResolvedValue(null);
   db.__store.attendance = [];
   db.__store.balanceUpdated = false;
+  db.__store.leaveStatus = LeaveStatus.PENDING;
   db.leave.create.mockImplementation(async ({ data }: { data: unknown }) => ({
     id: 'leave-1',
     ...(data as object),
@@ -501,11 +506,11 @@ describe('approveLeave', () => {
   });
 
   it('rolls back the whole approval when the last attendance day refuses', async () => {
-    db.leave.findUnique.mockResolvedValue(leaveRow({ status: LeaveStatus.PENDING }));
-    // A 3-day leave: day 1 and day 2 write, day 3 refuses.
-    db.leave.update.mockResolvedValue(
+    // A 3-day leave: day 1 and day 2 write, day 3 refuses. The date range comes
+    // from the row the guard read, so the fixture that feeds `findUnique` sets it.
+    db.leave.findUnique.mockResolvedValue(
       leaveRow({
-        status: LeaveStatus.APPROVED,
+        status: LeaveStatus.PENDING,
         startDate: new Date('2026-01-05T00:00:00.000Z'),
         endDate: new Date('2026-01-07T00:00:00.000Z'),
         totalDays: 3,
@@ -519,6 +524,15 @@ describe('approveLeave', () => {
     // effect in `__store` just as a real write would touch the DB. A lazy
     // operation that is never awaited writes nothing.
     let attempted = 0;
+    db.leave.update.mockImplementation(async ({ data }: { data: { status: LeaveStatus } }) => {
+      db.__store.leaveStatus = data.status;
+      return leaveRow({
+        status: data.status,
+        startDate: new Date('2026-01-05T00:00:00.000Z'),
+        endDate: new Date('2026-01-07T00:00:00.000Z'),
+        totalDays: 3,
+      });
+    });
     db.staffAttendance.create.mockImplementation(() =>
       lazy(() => {
         attempted += 1;
@@ -540,12 +554,28 @@ describe('approveLeave', () => {
 
     // Day 3 was attempted, no fourth day followed.
     expect(attempted).toBe(3);
-    // The transaction rolled back: neither the balance decrement nor the two
-    // attendance writes that ran before the failure survive.
+    // The transaction rolled back: the status update, the balance decrement and
+    // the two attendance writes that ran before the failure all revert. The
+    // status matters most — left APPROVED, a retry would short-circuit at the
+    // guard and a later cancellation would credit days never spent.
+    expect(db.__store.leaveStatus).toBe(LeaveStatus.PENDING);
     expect(db.__store.balanceUpdated).toBe(false);
     expect(db.__store.attendance).toEqual([]);
     // The audit trail is written only after the transaction succeeds.
     expect(db.auditLog.create).not.toHaveBeenCalled();
+
+    // The consequence the reviewer named: because the status reverted, a
+    // cancellation of this (still pending) request must not credit the balance.
+    db.leave.findUnique.mockResolvedValue(
+      leaveRow({ status: db.__store.leaveStatus as LeaveStatus })
+    );
+    db.leave.update.mockResolvedValue(leaveRow({ status: LeaveStatus.CANCELLED }));
+    const balanceWrites = db.leaveBalance.update.mock.calls.length;
+
+    await cancelLeave('leave-1');
+
+    expect(db.leaveBalance.update.mock.calls.length).toBe(balanceWrites);
+    expect(db.staffAttendance.findMany).not.toHaveBeenCalled();
   });
 });
 
