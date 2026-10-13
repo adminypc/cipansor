@@ -24,7 +24,7 @@ import {
 import { seesAllUnits } from '@/utils/resolve-unit-id';
 import { CLASS_ENROLLMENT_STATUS, STUDENT_STATUS } from '@cipansor/shared';
 import { nisMapForUnit } from '@/utils/student-nis';
-import { wibMonthYear, wibMonthRange } from '@/utils/wib-day';
+import { wibMonthYear, wibMonthRange, wibDate } from '@/utils/wib-day';
 
 // =====================================
 // PAYMENT TYPE SERVICE
@@ -1488,7 +1488,7 @@ export async function generateBulkSppInvoices(data: {
     },
   });
 
-  const dueDate = new Date(year, month, dueDay);
+  const dueDate = wibDate(year, month, dueDay);
   const period = `${
     [
       'Januari',
@@ -1553,7 +1553,7 @@ export async function generateBulkSppInvoices(data: {
 // Generate recurring bills for all active students (Auto-billing scheduler)
 export async function generateRecurringBills(at: Date = new Date()) {
   const { year, month } = wibMonthYear(at);
-  const dueDate = new Date(year, month, 10);
+  const dueDate = wibDate(year, month, 10);
   const period = `${
     [
       'Januari',

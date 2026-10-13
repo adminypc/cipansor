@@ -61,6 +61,19 @@ export function wibMonthRange(year: number, month: number): { start: Date; end: 
   return { start, end };
 }
 
+/**
+ * A WIB calendar day as an instant: `day` at 00:00 WIB (UTC+7), with `month`
+ * zero-based (0-11). Built by rolling the day in UTC and subtracting the fixed
+ * offset, so it is the same instant on any server clock — a
+ * `new Date(year, month, day)` reads the server's timezone and, east of WIB
+ * (e.g. UTC+8), lands the first of the month in the previous WIB month.
+ * `Date.UTC` also rolls an over-large `day` into the next month, as the local
+ * constructor did.
+ */
+export function wibDate(year: number, month: number, day: number): Date {
+  return new Date(Date.UTC(year, month, day) - 7 * 60 * 60 * 1000);
+}
+
 /** A `@db.Date` value as a date input shows it. */
 export function dayOf(date: Date | null): string | null {
   return date ? date.toISOString().slice(0, 10) : null;

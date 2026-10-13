@@ -62,7 +62,9 @@ describe('runMonthlyAutoBilling bills the WIB calendar month', () => {
     await runMonthlyAutoBilling();
 
     expect(createdInvoice().period).toBe('Agustus 2026');
-    expect(createdInvoice().dueDate).toEqual(new Date(2026, 7, 10));
+    // 10 August at 00:00 WIB — the due date is a WIB day, not a server-local
+    // `new Date(2026, 7, 10)` (which on a UTC server would be 07:00 WIB).
+    expect(createdInvoice().dueDate).toEqual(new Date('2026-08-09T17:00:00.000Z'));
     // The invoice number carries the same WIB month as the period, so the two
     // never disagree about which month a bill belongs to.
     expect(createdInvoice().invoiceNumber).toMatch(/^INV-202608-/);
@@ -73,7 +75,7 @@ describe('runMonthlyAutoBilling bills the WIB calendar month', () => {
     await runMonthlyAutoBilling();
 
     expect(createdInvoice().period).toBe('Januari 2026');
-    expect(createdInvoice().dueDate).toEqual(new Date(2026, 0, 10));
+    expect(createdInvoice().dueDate).toEqual(new Date('2026-01-09T17:00:00.000Z'));
     expect(createdInvoice().invoiceNumber).toMatch(/^INV-202601-/);
   });
 

@@ -156,6 +156,55 @@ describe('Finance Scheduler Unit Tests - Auto Billing', () => {
       }
     });
 
+    it('does not bill a first-day invoice twice on a server east of WIB', async () => {
+      // Same mismatch as the bulk generator: a local due date can precede the
+      // WIB guard on a server east of WIB. Emulate Prisma's dueDate gte/lt
+      // filter against what was stored and rerun.
+      const prevTz = process.env.TZ;
+      process.env.TZ = 'Asia/Makassar'; // UTC+8, east of WIB
+      try {
+        vi.mocked(prisma.student.findMany).mockResolvedValue([
+          { id: 'student-1', unitId: 'unit-1', userId: 'user-1' } as any,
+        ]);
+        vi.mocked(prisma.paymentType.findMany).mockResolvedValue([
+          {
+            id: 'pt-spp',
+            code: 'SPP',
+            amount: new Prisma.Decimal(500000),
+            unitId: 'unit-1',
+            name: 'SPP',
+          } as any,
+        ]);
+
+        const stored: Array<{ dueDate: Date }> = [];
+        vi.mocked(prisma.invoice.create).mockImplementation((async ({ data }: any) => {
+          stored.push({ dueDate: data.dueDate });
+          return { id: `inv-${stored.length}`, ...data } as any;
+        }) as never);
+        vi.mocked(prisma.invoice.findFirst).mockImplementation((async ({ where }: any) => {
+          if (!where?.dueDate) return null; // generateInvoiceNumber's prefix lookup
+          const { gte, lt } = where.dueDate;
+          return stored.find((r) => r.dueDate >= gte && r.dueDate < lt) ?? null;
+        }) as never);
+
+        const at = new Date('2026-07-31T21:00:00Z'); // 1 Aug WIB
+        await generateRecurringBills(at);
+        expect(stored).toHaveLength(1);
+        // 10 August 00:00 WIB, inside the guard even though a UTC+8 local
+        // construction would put it at 2026-08-09T16:00Z.
+        expect(stored[0].dueDate.toISOString()).toBe('2026-08-09T17:00:00.000Z');
+
+        const second = await generateRecurringBills(at);
+        expect(stored).toHaveLength(1);
+        expect(second.created).toBe(0);
+        expect(second.skipped).toBe(1);
+      } finally {
+        vi.mocked(prisma.invoice.findFirst).mockReset();
+        if (prevTz === undefined) delete process.env.TZ;
+        else process.env.TZ = prevTz;
+      }
+    });
+
     it('should skip invoice creation if already billed for the month', async () => {
       vi.mocked(prisma.student.findMany).mockResolvedValue([
         { id: 'student-1', unitId: 'unit-1', userId: 'user-1' } as any,

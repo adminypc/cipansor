@@ -244,6 +244,59 @@ describe('generateBulkSppInvoices', () => {
       else process.env.TZ = prevTz;
     }
   });
+
+  it('does not bill a first-day invoice twice on a server east of WIB', async () => {
+    // The due date was built with `new Date(year, month, dueDay)`, which reads
+    // the server timezone. On UTC+8 a `dueDay: 1` bill lands at 2026-07-31T16:00Z
+    // — one hour *before* the WIB month guard opens (2026-07-31T17:00Z) — so a
+    // rerun could not find its own invoice and billed the student again. Emulate
+    // Prisma's `dueDate: { gte, lt }` filter against what was actually stored.
+    const prevTz = process.env.TZ;
+    process.env.TZ = 'Asia/Makassar'; // UTC+8, east of WIB
+    try {
+      (prisma.paymentType.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: 'pt-spp',
+        name: 'SPP',
+        amount: new Prisma.Decimal(350000),
+      });
+      (
+        prisma as unknown as { student: { findMany: ReturnType<typeof vi.fn> } }
+      ).student.findMany.mockResolvedValue([{ id: 'student-1', unitId: 'unit-1' }]);
+
+      const stored: Array<{ dueDate: Date }> = [];
+      vi.mocked(prisma.invoice.create).mockImplementation((async ({ data }: any) => {
+        stored.push({ dueDate: data.dueDate });
+        return { id: `inv-${stored.length}`, ...data } as any;
+      }) as never);
+      vi.mocked(prisma.invoice.findFirst).mockImplementation((async ({ where }: any) => {
+        if (!where?.dueDate) return null; // generateInvoiceNumber's prefix lookup
+        const { gte, lt } = where.dueDate;
+        return stored.find((r) => r.dueDate >= gte && r.dueDate < lt) ?? null;
+      }) as never);
+
+      const run = () =>
+        financeService.generateBulkSppInvoices({
+          unitId: 'unit-1',
+          paymentTypeId: 'pt-spp',
+          year: 2026,
+          month: 7, // August
+          dueDay: 1,
+        });
+
+      await run();
+      expect(stored).toHaveLength(1);
+      expect(stored[0].dueDate.toISOString()).toBe('2026-07-31T17:00:00.000Z'); // 00:00 WIB 1 Aug
+
+      const second = await run();
+      expect(stored).toHaveLength(1); // the rerun found the invoice, created none
+      expect(second.created).toBe(0);
+      expect(second.skipped).toBe(1);
+    } finally {
+      vi.mocked(prisma.invoice.findFirst).mockReset();
+      if (prevTz === undefined) delete process.env.TZ;
+      else process.env.TZ = prevTz;
+    }
+  });
 });
 
 // The billing screens read these four. They had no unit filter and returned
