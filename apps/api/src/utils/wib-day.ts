@@ -73,11 +73,12 @@ export function utcMonthRange(year: number, month: number): { start: Date; end: 
 
 /**
  * The date-only value (midnight UTC) of the WIB calendar day an instant falls
- * on. The single canonical form a `dueDate` may take, applied at every writer —
- * the bulk/recurring generators already produce it, and the manual create/update
- * paths are normalized through here — so an invoice's month can be derived from
- * the value alone, whatever instant the caller supplied (`…T00:00:00Z`, or a
- * WIB-midnight `…T00:00:00+07:00` reading as the previous UTC day).
+ * on. Applied at the manual create/update paths so a `dueDate` this module
+ * writes can be read as a date alone — the generators already produce that form
+ * via `wibDate`. A caller that means "1 August" as 00:00 WIB sends
+ * `2026-07-31T17:00Z`, which on a UTC server reads as 31 July; normalizing to the
+ * WIB day (2026-08-01T00:00Z) keeps it inside August's `utcMonthRange`, so the
+ * bulk generator's guard finds it and the reminder reaches it.
  */
 export function wibDayDate(moment: Date): Date {
   return new Date(`${wibDayOf(moment)}T00:00:00.000Z`);
