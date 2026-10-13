@@ -2589,21 +2589,29 @@ export async function approveLeave(id: string, approverId: string, data: Approve
     );
   }
 
-  const updateData: Prisma.LeaveUpdateInput = {
-    status: data.status,
-    approvedBy: { connect: { id: approverId } },
-    approvedAt: new Date(),
-  };
-
-  if (data.status === LeaveStatus.REJECTED && data.rejectedNote) {
-    updateData.rejectedNote = data.rejectedNote;
-  }
-
-  // A rejection changes only the row; it has no side effects to keep in step.
+  // A rejection changes only the row, but the move is guarded all the same: an
+  // unconditional update racing an approval would overwrite APPROVED while the
+  // balance and attendance the approval spent stay put — a rejected leave whose
+  // days were debited, with nothing recording that. `updateMany` takes scalar
+  // fields only, so the approver is written as `approvedById` here, not as
+  // `approvedBy: { connect }` (which only `update` accepts).
   if (data.status !== LeaveStatus.APPROVED) {
-    return prisma.leave.update({
+    const { count } = await prisma.leave.updateMany({
+      where: { id, status: existing.status },
+      data: {
+        status: data.status,
+        approvedById: approverId,
+        approvedAt: new Date(),
+        ...(data.rejectedNote ? { rejectedNote: data.rejectedNote } : {}),
+      },
+    });
+    if (count !== 1) {
+      throw Errors.conflict(
+        'Cuti ini sudah diputuskan oleh permintaan lain. Muat ulang halaman untuk melihat status terbarunya.'
+      );
+    }
+    return prisma.leave.findUniqueOrThrow({
       where: { id },
-      data: updateData,
       include: { staff: true, teacher: true },
     });
   }

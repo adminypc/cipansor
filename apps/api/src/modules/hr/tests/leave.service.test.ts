@@ -449,7 +449,7 @@ describe('approveLeave', () => {
 
   it('records a rejection note and touches neither the balance nor attendance', async () => {
     db.leave.findUnique.mockResolvedValue(leaveRow({ status: LeaveStatus.PENDING }));
-    db.leave.update.mockResolvedValue(
+    db.leave.findUniqueOrThrow.mockResolvedValue(
       leaveRow({ status: LeaveStatus.REJECTED, staff: null, teacher: { userId: 'user-1' } })
     );
 
@@ -458,20 +458,34 @@ describe('approveLeave', () => {
       rejectedNote: 'staf tidak cukup',
     });
 
-    expect(db.leave.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          status: LeaveStatus.REJECTED,
-          rejectedNote: 'staf tidak cukup',
-          approvedBy: { connect: { id: 'approver-1' } },
-        }),
-      })
-    );
+    // The rejection move is guarded on the status the guard read, like approval.
+    expect(db.leave.updateMany).toHaveBeenCalledWith({
+      where: { id: 'leave-1', status: LeaveStatus.PENDING },
+      data: expect.objectContaining({
+        status: LeaveStatus.REJECTED,
+        rejectedNote: 'staf tidak cukup',
+        approvedById: 'approver-1',
+      }),
+    });
     expect(db.leaveBalance.update).not.toHaveBeenCalled();
     expect(db.staffAttendance.upsert).not.toHaveBeenCalled();
     expect(db.staffAttendance.update).not.toHaveBeenCalled();
     expect(db.staffAttendance.create).not.toHaveBeenCalled();
     expect(db.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('refuses a rejection whose pending status was decided by a concurrent request', async () => {
+    db.leave.findUnique.mockResolvedValue(leaveRow({ status: LeaveStatus.PENDING }));
+    // The guarded move matches nothing: a concurrent approval decided the row
+    // first, so its balance debit and attendance must not be overwritten.
+    db.leave.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(
+      approveLeave('leave-1', 'approver-1', { status: LeaveStatus.REJECTED })
+    ).rejects.toThrow(/sudah diputuskan/i);
+
+    expect(db.leaveBalance.update).not.toHaveBeenCalled();
+    expect(db.staffAttendance.create).not.toHaveBeenCalled();
   });
 
   it('spends the balance once and marks attendance when approving a pending leave', async () => {
