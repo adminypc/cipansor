@@ -134,3 +134,21 @@ Setiap automation yang mengomentari issue harus mengakhiri komentarnya dengan
 footer AI-disclosure dan menjaga pemicu `issue_comment.created` dengan
 `!icontains(comment.body, 'This comment was created by an AI agent')`. Tanpa itu
 automation memicu ulang dirinya sendiri — issue #680. Lihat `docs/LABELS.md`.
+
+Sejak 2026-10-13 armada juga berbagi lima aturan (diminta pengguna, terpasang di
+setiap prompt dan dijaga workflow deterministik):
+
+- **Mengakui dulu.** Sebelum menangani apa pun, react 👀 pada objeknya
+  (`POST …/issues/<n>/reactions`, `{"content":"eyes"}`; untuk komentar
+  `…/issues/comments/<id>/reactions`), supaya orang tahu automation bekerja.
+  Pemicu komentar dijaga `acknowledge.yml`.
+- **Satu deskripsi.** Kesimpulan final (triase, estimasi, QA, putusan tinjauan)
+  ditulis ke **body** issue/PR di bawah penanda tetap (`<!-- sdlc:… -->`),
+  diperbarui di tempat, bukan tersebar di komentar.
+- **Basmalah.** Setiap body dibuka dengan «بِسْمِ اللَّهِ الرَّحْمَنِ الرَّحِيمِ»;
+  form issue dan templat PR membawanya, `basmalah.yml` menambahkannya bila lupa.
+- **`ready` eksklusif dan kuat.** `ready` hanya bila sangat yakin, tanpa
+  pertanyaan terbuka, dan tidak pernah bersama `question`/`needs-info`/
+  `pending-maintainer` (#814). Kritik habis-habisan dulu, baru `ready`.
+- **Hanya `cipansor-bot` melabeli.** Label akun lain dicabut `label-guard.yml`,
+  kecuali `rilis-disetujui`, `rilis-ditolak`, `bot-implement`.

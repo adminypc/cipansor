@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""Bring the OpenHands SDLC automations level with the fleet standard.
+
+The automations live outside this repository (they are deployed through the
+OpenHands automation API), but their prompts and their runner tarballs must
+follow the rules the repository writes down (docs/SDLC-FLOW.md). This script
+applies the 2026-10-13 changes to every automation:
+
+  1. acknowledgement — react 👀 on the object it is about to handle, so a person
+     sees the automation is working (the reporter asked for this);
+  2. one description — the basmalah opens every issue/PR body, and the final
+     summary (triage, estimate, QA result, review verdict) is written into the
+     main description, not scattered across comments;
+  3. harsher triage/review — criticize hard, ask probing questions, and never
+     apply `ready` while anything is still open (a `ready` label beside a
+     `question` label is the defect this prevents);
+  4. labels — only `cipansor-bot` labels; the deterministic enforcement is the
+     `Label guard` workflow, the prompt states the rule.
+
+It rewrites `prompt.txt` inside each runner tarball, re-uploads it, and PATCHes
+the automation's `prompt` and `tarball_path`. `main.py`, `setup.sh` and
+`finish_tool_hook.py` are left byte-for-byte; only the prompt changes. Every
+step is idempotent — a second run finds the markers already present and skips.
+
+Usage:
+    OPENHANDS_API_KEY=... python3 scripts/deploy-sdlc-agents.py            # dry run
+    OPENHANDS_API_KEY=... DEPLOY=true python3 scripts/deploy-sdlc-agents.py
+    OPENHANDS_API_KEY=... DEPLOY=true ONLY="SDLC 15" python3 scripts/deploy-sdlc-agents.py
+"""
+import io
+import json
+import os
+import sys
+import tarfile
+import time
+import urllib.parse
+import urllib.request
+
+API = "https://app.all-hands.dev/api/automation/v1"
+KEY = os.environ.get("OPENHANDS_API_KEY", "")
+DEPLOY = os.environ.get("DEPLOY", "").lower() in ("1", "true", "yes")
+ONLY = os.environ.get("ONLY", "")
+
+BODY_MARK = "BODY ISSUE/PR — SATU DESKRIPSI (WAJIB)"
+TAIL_MARK = "PERILAKU SASARAN (level agentic)"
+
+BODY_BLOCK = """BODY ISSUE/PR — SATU DESKRIPSI (WAJIB)
+- Setiap body issue atau PR yang Anda tulis WAJIB dibuka dengan baris persis ini, lalu satu baris kosong, baru isinya:
+  بِسْمِ اللَّهِ الرَّحْمَنِ الرَّحِيمِ
+  (Bismillaahirrohmaanirrohiim bila tidak bisa menulis Arab.)
+- Ringkasan final tinggal di DESKRIPSI UTAMA, bukan tersebar di komentar. Semua yang perlu diputuskan orang (hasil triase, estimasi, hasil QA, putusan tinjauan, kriteria, pertanyaan terbuka) ditulis ke body issue/PR lewat `PATCH /repos/<owner>/<repo>/issues/<n>` (body adalah field `body`). Komentar hanya untuk percakapan yang berjalan; sebelum berhenti, salin kesimpulannya ke body dengan penanda idempoten (mis. `<!-- sdlc:triase -->`) dan perbarui bagian berpenanda itu, jangan menumpuk.
+- Sebelum menangani apa pun, tambahkan reaction 👀 pada objek yang Anda tangani (issue/PR/komentar) agar orang tahu automation bekerja: `POST /repos/<owner>/<repo>/issues/<n>/reactions` dengan body `{"content":"eyes"}`; untuk komentar: `POST /repos/<owner>/<repo>/issues/comments/<id>/reactions`. Jangan menumpuk reaction.
+- Hanya `cipansor-bot` (GITHUB_BOT_TOKEN) yang boleh memasang label. Jangan pasang label apa pun lewat `GITHUB_TOKEN`. `bot-implement`, `rilis-disetujui`, `rilis-ditolak` adalah keputusan maintainer — jangan pernah memasangnya.
+"""
+
+# The hardened triage/review tail per automation. Everything else keeps its tail
+# and only gains the BODY_BLOCK. Keys are matched as a substring of the name.
+TAILS = {
+    "SDLC 01": """PERILAKU SASARAN (level agentic)
+Triase bug ini dengan KRITIS dan habis-habisan. Baca issue, cari duplikat di antara issue terbuka dan tertutup, dan tanyakan bertubi-tubi sampai sangat yakin: apa kegagalan dan penyebabnya, area/modul mana (path nyata), kriteria penerimaan yang bisa diamati, apakah premisnya benar. Tulis hasilnya ke DESKRIPSI UTAMA issue (edit body, bagian `<!-- sdlc:triase -->`), bukan komentar terpisah: tingkat keparahan beserta alasan, area yang bertanggung jawab, langkah berikutnya, dan pertanyaan yang tersisa. Terapkan hanya label yang sudah ada. JANGAN pasang `ready` (itu milik `Pelabel issue`). Tautkan setiap duplikat yang Anda temukan.
+""",
+    "SDLC 02": """PERILAKU SASARAN (level agentic)
+Estimasi usaha untuk issue ini, dikalibrasi terhadap pekerjaan serupa yang sudah di-merge di repo ini (sebut nomor PR-nya). Baca issue dan PR/issue pembanding, lalu tulis estimasi ke DESKRIPSI UTAMA issue (bagian `<!-- sdlc:estimasi -->`): ukuran (XS/S/M/L/XL), file/area yang kemungkinan tersentuh, risiko utama, dan kalibrasi. Bila issue terlalu kabur untuk diestimasi, katakan itu dan daftar pertanyaan yang akan membukanya — jangan menebak angka.
+""",
+    "SDLC 15": """PERILAKU SASARAN (level agentic)
+Triase issue ini dengan KRITIS dan habis-habisan. Sebelum memberi label apa pun, tanyakan bertubi-tubi sampai sangat yakin: apa masalah atau tujuannya persis; apakah kriteria penerimaannya konkret dan bisa diamati; apakah ada ketergantungan, non-goal, atau asumsi tersembunyi; apakah premisnya benar atau justru ada opsi "tidak perlu sama sekali". Bila satu saja belum terjawab, JANGAN pasang `ready`.
+
+Label:
+- Tepat satu tipe (bug/enhancement/documentation/refactor/chore/security) — tipe yang benar-benar dialami, bukan yang diminta.
+- Tepat satu prioritas (priority:critical/high/medium/low) dari dampak, urgensi, dan apakah menghambat pekerjaan lain; `priority:critical` hanya untuk gangguan total, kehilangan data, atau masalah keamanan.
+- `ready` HANYA bila SANGAT-SANGAT yakin: tujuan jelas, kriteria penerimaan konkret, tanpa pertanyaan terbuka. `ready` tidak boleh bersama `question`, `needs-info`, atau `pending-maintainer` — bila masih ada yang perlu dibahas, diputuskan, atau dikritisi, jangan `ready` dulu. Issue yang membawa `ready` dan `question` sekaligus adalah cacat yang harus dicegah.
+- `question` bila ini pertanyaan, bukan perubahan. `duplicate` + tautkan aslinya bila duplikat. Cacat tipis yang penyebabnya belum diketahui tetap `bug` + satu prioritas, bukan `needs-info` (Reproduksi bug menyelidikinya).
+- Jangan mengarang label; baca label repo dulu. Jangan pasang `bot-implement`.
+
+Tulis hasilnya ke DESKRIPSI UTAMA issue (edit body, bagian `<!-- sdlc:triase -->`), bukan komentar terpisah, dan perbarui bagian itu bila sudah ada:
+## Triase
+- Tipe / Prioritas / Kesiapan (beserta alasan masing-masing)
+- Area/modul (path nyata)
+- Kriteria penerimaan
+- Pertanyaan terbuka (kosong bila `ready`)
+- Duplikat (bila ada)
+""",
+    "SDLC 16": """PERILAKU SASARAN (level agentic)
+Issue `needs-info` ini baru menerima komentar. Baca seluruh issue dan komentar baru, lalu putuskan dengan KRITIS apakah pelapor sudah memasok yang diminta. Bila kini jelas dan bisa diimplementasikan, hapus `needs-info`, tambah `ready` (hanya bila benar-benar yakin, tanpa pertanyaan terbuka), dan tulis penilaian ulang ke DESKRIPSI UTAMA issue (bagian `<!-- sdlc:triase -->`). Bila masih kabur, biarkan `needs-info` dan tulis detail spesifik yang masih kurang — jangan mengulang pertanyaan yang sudah ditanyakan. Bila duplikat, `duplicate` + tautkan aslinya. Bila tidak valid, `invalid` + alasannya. Jangan menghapus `ready` yang bukan Anda pasang tanpa menjelaskan alasannya.
+""",
+    "SDLC 22": """PERILAKU SASARAN (level agentic)
+Menjawab maintainer pada issue `pending-maintainer` atau `needs-info`. Baca percakapan, suplai detail yang kurang, dan tanyakan bertubi-tubi sampai sangat yakin. Lampu hijau memberi `ready` (hanya bila tidak ada pertanyaan terbuka); penolakan memberi `wontfix` dan menutup. Tulis kesimpulannya ke DESKRIPSI UTAMA issue (bagian `<!-- sdlc:diskusi -->`), bukan hanya komentar. Ia tidak pernah bertindak atas komentarnya sendiri.
+""",
+    "SDLC 08": """PERILAKU SASARAN (level agentic)
+Tinjau PR ini dengan KRITIS dan habis-habisan. Baca deskripsi, seluruh diff terhadap `main`, setiap thread, dan issue tertaut. Tanyakan bertubi-tubi: apa yang bisa salah, apa yang belum diuji, apa yang bertentangan dengan keputusan di `.claude/memory/decisions/`, apa yang akan pecah di produksi. Untuk masalah lokal/mekanis, kirim komentar inline berisi blok `suggestion` agar bisa diterapkan satu klik; untuk masalah struktural, usulkan perubahan konkret dalam kata-kata. Jangan approve, jangan merge. Jangan mengarang masalah agar terlihat berguna: bila diff-nya bersih, katakan itu. Tulis ringkasan putusan (temuan, tingkat keparahan, apa yang menghalangi merge) ke DESKRIPSI UTAMA PR (bagian `<!-- sdlc:tinjauan -->`), bukan hanya komentar.
+""",
+    "SDLC 10": """PERILAKU SASARAN (level agentic)
+Jalankan alur yang berubah pada PR ini dan laporkan lulus/gagal dengan bukti (perintah, keluaran, tangkapan layar). Kritisi habis-habisan: cari kasus batas, keadaan gagal, dan jalur yang tidak diuji. Tulis hasilnya ke DESKRIPSI UTAMA PR (bagian `<!-- sdlc:qa -->`), bukan hanya komentar.
+""",
+    "SDLC 18": """PERILAKU SASARAN (level agentic)
+Bertindaklah sebagai gerbang tinjau resmi untuk PR ini dan kirim SATU review yang SAH per head. IDENTITAS (WAJIB): kirim review lewat `POST /repos/cipansor/cipansor/pulls/<n>/reviews` memakai `GITHUB_BOT_TOKEN` (akun `cipansor-bot`), supaya approval dari penulis PR (akun `adminypc`) tidak ditolak sebagai tinjauan diri. Jangan pakai `GITHUB_TOKEN` untuk mengirim review.
+
+IDEMPOTEN (WAJIB, invarian 4): sebelum menilai, cari review gerbang yang sudah ada pada head ini. Setiap review/komentar yang Anda kirim WAJIB memuat penanda `<!-- sdlc:gerbang:<nomor-pr>:<head-sha> -->`. Bila review berpenanda itu sudah ada pada head SHA yang sama, JANGAN kirim review kedua — laporkan bahwa head ini sudah ditinjau lalu berhenti.
+
+GERBANG CI — JANGAN MENUNGGU: pemicu utama (dispatch `pr-lifecycle`) hanya menyala saat semua check wajib sudah hijau, jadi jangan pernah mengundi-undi check. Periksa `GET /repos/cipansor/cipansor/commits/<sha>/check-runs` SEKALI saja. Bila masih ada check wajib queued/in progress, berhenti tanpa menunggu dan laporkan `check belum selesai`. Bila ada check merah, JANGAN ubah PR ke draft; cukup kirim `REQUEST_CHANGES` yang menyebut check merah.
+
+METODE: baca deskripsi PR, seluruh diff terhadap `main`, setiap thread, dan label terhadap issue tertaut; kritisi habis-habisan — kebenaran, risiko keamanan, cakupan tes, konsistensi dengan `.claude/memory/decisions/` dan AGENTS.md, dan apa yang akan pecah di produksi. Untuk tiap masalah lokal/mekanis, sertakan blok `suggestion`.
+
+PUTARAN (invarian 7): hitung review gerbang yang sudah ada (penanda `<!-- sdlc:gerbang:`). Bila sudah 3 putaran perubahan, JANGAN `REQUEST_CHANGES` lagi: sampaikan sengketa sebagai pertanyaan pilihan ganda kepada maintainer (rekomendasi di urutan pertama), lalu berhenti.
+
+KEPUTUSAN: `APPROVE` bila tidak ada masalah yang menghalangi merge; `REQUEST_CHANGES` bila ada; `COMMENT` bila ragu. Jangan pernah menyetujui hanya karena CI hijau, jangan pernah merge, jangan push ke `main`. Tulis putusan akhir (verdict, temuan, apa yang menghalangi) ke DESKRIPSI UTAMA PR (bagian `<!-- sdlc:gerbang -->`), bukan hanya komentar.
+""",
+}
+
+
+def req(method, path, data=None, raw=False):
+    url = f"{API}{path}"
+    body = None
+    headers = {"Authorization": f"Bearer {KEY}"}
+    if data is not None:
+        body = json.dumps(data).encode()
+        headers["Content-Type"] = "application/json"
+    r = urllib.request.Request(url, data=body, headers=headers, method=method)
+    with urllib.request.urlopen(r, timeout=60) as resp:
+        payload = resp.read()
+        return payload if raw else json.loads(payload or b"{}")
+
+
+def split_tail(prompt):
+    i = prompt.find(TAIL_MARK)
+    return prompt[:i] if i >= 0 else prompt
+
+
+def new_prompt(name, prompt):
+    head = split_tail(prompt)
+    # Insert the BODY block once, right after the footer paragraph.
+    if BODY_MARK not in head:
+        anchor = "_This comment was created by an AI agent (OpenHands) on behalf of the maintainer._"
+        idx = head.find(anchor)
+        if idx >= 0:
+            end = head.index("\n", idx + len(anchor)) + 1
+            head = head[:end] + "\n" + BODY_BLOCK + head[end:]
+        else:
+            head = BODY_BLOCK + "\n" + head
+    tail = next((v for k, v in TAILS.items() if k in name), None)
+    if tail is None:
+        # Keep the original tail (so its behaviour is unchanged) and append the
+        # body/reaction reminders that apply to every automation.
+        orig = prompt[len(head):]
+        return head + orig
+    return head + tail
+
+
+def patch_tarball(aid, prompt):
+    """Rewrite prompt.txt inside the tarball, leaving every other member."""
+    r = req("GET", f"/{aid}/tarball", raw=True)
+    src = tarfile.open(fileobj=io.BytesIO(r), mode="r:gz")
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode="w:gz") as dst:
+        for m in src.getmembers():
+            if m.name == "prompt.txt":
+                data = prompt.encode()
+                m.size = len(data)
+                dst.addfile(m, io.BytesIO(data))
+            else:
+                dst.addfile(m, src.extractfile(m))
+    return out.getvalue()
+
+
+def upload(data, name):
+    url = f"{API}/uploads?name={urllib.parse.quote(name)}"
+    r = urllib.request.Request(
+        url, data=data, headers={"Authorization": f"Bearer {KEY}", "Content-Type": "application/gzip"}, method="POST"
+    )
+    with urllib.request.urlopen(r, timeout=120) as resp:
+        return json.loads(resp.read() or b"{}")
+
+
+if __name__ == "__main__":
+    if not KEY:
+        sys.exit("OPENHANDS_API_KEY is not set")
+    autos = req("GET", "/")["automations"]
+    print(f"{len(autos)} automation(s); DEPLOY={DEPLOY} ONLY={ONLY or '(all)'}")
+    for a in autos:
+        name = a["name"]
+        if ONLY and ONLY not in name:
+            continue
+        aid = a["id"]
+        old = a.get("prompt") or ""
+        new = new_prompt(name, old)
+        changed = new != old
+        print(f"- {name}: {'changed' if changed else 'already current'}")
+        if not changed or not DEPLOY:
+            continue
+        blob = patch_tarball(aid, new)
+        up = upload(blob, f"{name} — fleet standard 2026-10-13")
+        req("PATCH", f"/{aid}", {"prompt": new, "tarball_path": up.get("tarball_path")})
+        print(f"    deployed (tarball {up.get('tarball_path')})")
+        time.sleep(1)
+    print("done")
