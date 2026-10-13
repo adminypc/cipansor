@@ -55,9 +55,10 @@ const isBackported = (name, version, range) =>
  * Advisories accepted for a while because nothing can be done yet: no patched
  * release exists, and the package is installed only for development tooling.
  *
- * A pin in `pnpm.overrides` is the fix whenever a fixed version exists. When
- * none does, the alternative is a red Security job on every PR and on `main`
- * — which also stops the staging deploy — until a third party publishes one.
+ * A pin in the `overrides` map of `pnpm-workspace.yaml` is the fix whenever a
+ * fixed version exists. When none does, the alternative is a red Security job
+ * on every PR and on `main` — which also stops the staging deploy — until a
+ * third party publishes one.
  * An entry here waives exactly one advisory (by its URL) on exactly one
  * version, and only while all three hold:
  *
