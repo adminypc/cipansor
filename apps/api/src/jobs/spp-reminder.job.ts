@@ -14,7 +14,7 @@ import { prisma } from '@/lib/prisma';
 import { logger } from '@/lib/logger';
 import * as notificationService from '@/modules/notifications/notifications.service';
 import { notificationService as channelService } from '@/modules/notifications/email-sms.service';
-import { wibMonthYear, wibMonthRange } from '@/utils/wib-day';
+import { wibMonthYear, utcMonthRange } from '@/utils/wib-day';
 
 const formatter = new Intl.NumberFormat('id-ID', {
   style: 'currency',
@@ -30,11 +30,11 @@ export async function sendMonthlySppReminders(now: Date = new Date()) {
   // Match the WIB month the auto-billing job labelled its invoices with, so the
   // reminder window does not drift a month away from them.
   const { year, month } = wibMonthYear(now);
-  // Boundaries are instants, so they must be built at 00:00 WIB — [start, end)
-  // with `end` the 1st of the next WIB month. `new Date(year, month, 1)` reads
-  // the fields in the server's timezone: on a UTC server it starts the month at
-  // 07:00 WIB and lets the last seven hours of the month leak into the next.
-  const { start: monthStart, end: monthEnd } = wibMonthRange(year, month);
+  // `dueDate` holds a date-only value at midnight UTC, so the window bounds it
+  // the same way: [1st 00:00Z, next 1st 00:00Z). A WIB-midnight range would
+  // start the month at 17:00Z the day before and pull the next month's first
+  // day (00:00Z) into this one.
+  const { start: monthStart, end: monthEnd } = utcMonthRange(year, month);
 
   const invoices = await prisma.invoice.findMany({
     where: {

@@ -236,8 +236,8 @@ describe('generateBulkSppInvoices', () => {
       });
 
       expect(vi.mocked(prisma.invoice.findFirst).mock.calls[0][0]?.where?.dueDate).toEqual({
-        gte: new Date('2026-07-31T17:00:00.000Z'),
-        lt: new Date('2026-08-31T17:00:00.000Z'),
+        gte: new Date('2026-08-01T00:00:00.000Z'),
+        lt: new Date('2026-09-01T00:00:00.000Z'),
       });
     } finally {
       if (prevTz === undefined) delete process.env.TZ;
@@ -285,7 +285,7 @@ describe('generateBulkSppInvoices', () => {
 
       await run();
       expect(stored).toHaveLength(1);
-      expect(stored[0].dueDate.toISOString()).toBe('2026-07-31T17:00:00.000Z'); // 00:00 WIB 1 Aug
+      expect(stored[0].dueDate.toISOString()).toBe('2026-08-01T00:00:00.000Z'); // date-only 1 Aug
 
       const second = await run();
       expect(stored).toHaveLength(1); // the rerun found the invoice, created none
@@ -379,6 +379,21 @@ describe('bill and payment reads: scope and fields', () => {
     });
     const julySpp = new Date('2026-07-10T00:00:00Z');
     expect(julySpp >= dueDate.gte && julySpp < dueDate.lt).toBe(true);
+  });
+
+  it('a first-day bill stays inside its academic year, not the one before', async () => {
+    // A dueDay:1 bill is stored at the first of the month. Kept as a date-only
+    // value (00:00Z), July's bill sits at the year's own `gte`, not in June of
+    // the year before — which a WIB-midnight instant (17:00Z the day before)
+    // would fall outside of.
+    vi.mocked(prisma.academicYear.findUnique).mockResolvedValue({
+      startDate: new Date('2026-07-15T00:00:00Z'),
+      endDate: new Date('2027-06-30T00:00:00Z'),
+    } as any);
+    await financeService.getInvoices({ ...page, academicYearId: 'ay-2627' } as any, smpTu);
+    const { dueDate } = lastInvoiceQuery().where.AND[1];
+    const firstDayBill = new Date('2026-07-01T00:00:00Z');
+    expect(firstDayBill >= dueDate.gte && firstDayBill < dueDate.lt).toBe(true);
   });
 
   it('an unknown academic year matches nothing instead of every year', async () => {

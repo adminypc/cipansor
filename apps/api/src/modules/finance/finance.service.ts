@@ -24,7 +24,7 @@ import {
 import { seesAllUnits } from '@/utils/resolve-unit-id';
 import { CLASS_ENROLLMENT_STATUS, STUDENT_STATUS } from '@cipansor/shared';
 import { nisMapForUnit } from '@/utils/student-nis';
-import { wibMonthYear, wibMonthRange, wibDate } from '@/utils/wib-day';
+import { wibMonthYear, wibDate, utcMonthRange } from '@/utils/wib-day';
 
 // =====================================
 // PAYMENT TYPE SERVICE
@@ -1070,14 +1070,12 @@ export async function getStudentFinanceSummary(studentId: string) {
 }
 
 export async function getUnitFinanceStats(unitId: string, month?: string) {
-  const dateFilter = month
-    ? {
-        dueDate: {
-          gte: new Date(`${month}-01`),
-          lt: new Date(new Date(`${month}-01`).setMonth(new Date(`${month}-01`).getMonth() + 1)),
-        },
-      }
-    : {};
+  let dateFilter: { dueDate?: { gte: Date; lt: Date } } = {};
+  if (month) {
+    const [year, monthIndex] = month.split('-').map(Number);
+    const { start, end } = utcMonthRange(year, monthIndex - 1);
+    dateFilter = { dueDate: { gte: start, lt: end } };
+  }
 
   // Tagihan unit = tagihan jenis bayar unit itu, termasuk milik santri yang
   // sejak itu pindah unit — tunggakannya tetap piutang unit penerbit.
@@ -1508,10 +1506,9 @@ export async function generateBulkSppInvoices(data: {
 
   const createdInvoices = [];
 
-  // The billed month as instants, so the idempotence guard below matches the
-  // same WIB window the reminder job uses (a `new Date(year, month, 1)` would
-  // read the server's timezone and miss an invoice due early on the 1st WIB).
-  const { start: monthStart, end: monthEnd } = wibMonthRange(year, month);
+  // The billed month, as the date-only bounds the due date column uses, so the
+  // guard matches an invoice from this run on any server timezone.
+  const { start: monthStart, end: monthEnd } = utcMonthRange(year, month);
 
   for (const student of students) {
     // Check if invoice already exists for this student/month
@@ -1594,8 +1591,8 @@ export async function generateRecurringBills(at: Date = new Date()) {
     return { processed, created, skipped };
   }
 
-  // The billed month as instants, shared by every guard below.
-  const { start: monthStart, end: monthEnd } = wibMonthRange(year, month);
+  // The billed month, as the date-only bounds the due date column uses.
+  const { start: monthStart, end: monthEnd } = utcMonthRange(year, month);
 
   // Process billing for each student matching payment types
   for (const student of activeStudents) {

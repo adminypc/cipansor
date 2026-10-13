@@ -62,9 +62,9 @@ describe('runMonthlyAutoBilling bills the WIB calendar month', () => {
     await runMonthlyAutoBilling();
 
     expect(createdInvoice().period).toBe('Agustus 2026');
-    // 10 August at 00:00 WIB — the due date is a WIB day, not a server-local
-    // `new Date(2026, 7, 10)` (which on a UTC server would be 07:00 WIB).
-    expect(createdInvoice().dueDate).toEqual(new Date('2026-08-09T17:00:00.000Z'));
+    // The due date is stored as a date-only value (10 August, midnight UTC) so
+    // that date readers render "10 Agustus" on any server timezone.
+    expect(createdInvoice().dueDate).toEqual(new Date('2026-08-10T00:00:00.000Z'));
     // The invoice number carries the same WIB month as the period, so the two
     // never disagree about which month a bill belongs to.
     expect(createdInvoice().invoiceNumber).toMatch(/^INV-202608-/);
@@ -75,7 +75,7 @@ describe('runMonthlyAutoBilling bills the WIB calendar month', () => {
     await runMonthlyAutoBilling();
 
     expect(createdInvoice().period).toBe('Januari 2026');
-    expect(createdInvoice().dueDate).toEqual(new Date('2026-01-09T17:00:00.000Z'));
+    expect(createdInvoice().dueDate).toEqual(new Date('2026-01-10T00:00:00.000Z'));
     expect(createdInvoice().invoiceNumber).toMatch(/^INV-202601-/);
   });
 
@@ -90,19 +90,19 @@ describe('runMonthlyAutoBilling bills the WIB calendar month', () => {
     expect(createdInvoice().invoiceNumber).toMatch(/^INV-202608-/);
   });
 
-  it('scopes the idempotence check to the WIB month it bills', async () => {
+  it('scopes the idempotence check to the billed month as the due-date column stores it', async () => {
     vi.setSystemTime(new Date('2026-07-31T21:00:00Z'));
     await runMonthlyAutoBilling();
 
-    // Bounds are the WIB month as instants: 00:00 WIB on 1 August is
-    // 2026-07-31T17:00Z, not the `new Date(2026, 7, 1)` a UTC server resolves
-    // to (2026-08-01T00:00Z, i.e. 07:00 WIB).
+    // Bounds are the billed month as a date-only column holds it: midnight UTC
+    // on the first, not a server-local `new Date(2026, 7, 1)` (07:00 WIB) nor a
+    // WIB-midnight instant (17:00Z the day before).
     expect(prisma.invoice.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           dueDate: {
-            gte: new Date('2026-07-31T17:00:00.000Z'),
-            lt: new Date('2026-08-31T17:00:00.000Z'),
+            gte: new Date('2026-08-01T00:00:00.000Z'),
+            lt: new Date('2026-09-01T00:00:00.000Z'),
           },
         }),
       })

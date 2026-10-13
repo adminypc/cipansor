@@ -42,36 +42,33 @@ export function wibMonthYear(moment: Date): { year: number; month: number } {
 }
 
 /**
- * A WIB calendar month as two instants: `[start, end)`, with `start` equal to
- * the first day of the month at 00:00 WIB and `end` the first day of the next
- * month at 00:00 WIB.
+ * A calendar day as the value a date-only column holds: midnight UTC.
  *
- * `month` is zero-based (0-11) like `Date.getMonth()`. Both bounds are built
- * with an explicit `+07:00` offset, not with `new Date(year, month, …)`, whose
- * fields are read in the server's timezone. On a UTC server the local form
- * would start "August" at August 1 07:00 WIB and end it seven hours into
- * September, so a timestamp near either midnight falls into the wrong month.
- */
-export function wibMonthRange(year: number, month: number): { start: Date; end: Date } {
-  const pad = (value: number) => String(value).padStart(2, '0');
-  const start = new Date(`${year}-${pad(month + 1)}-01T00:00:00.000+07:00`);
-  const nextYear = month === 11 ? year + 1 : year;
-  const nextMonth = (month + 1) % 12;
-  const end = new Date(`${nextYear}-${pad(nextMonth + 1)}-01T00:00:00.000+07:00`);
-  return { start, end };
-}
-
-/**
- * A WIB calendar day as an instant: `day` at 00:00 WIB (UTC+7), with `month`
- * zero-based (0-11). Built by rolling the day in UTC and subtracting the fixed
- * offset, so it is the same instant on any server clock — a
- * `new Date(year, month, day)` reads the server's timezone and, east of WIB
- * (e.g. UTC+8), lands the first of the month in the previous WIB month.
- * `Date.UTC` also rolls an over-large `day` into the next month, as the local
- * constructor did.
+ * Invoice `dueDate` is a date-only `DateTime`; the codebase stores these at
+ * midnight UTC (`academic-calendar.ts`, `seeds/paket-presentasi.ts`, and
+ * `academicYearBillingWindow`), readers stringify them without a timezone
+ * (`toLocaleDateString('id-ID')`, `toISOString().slice(0, 10)`), and the
+ * academic-year and monthly filters bound them with UTC first-of-month. A
+ * date-only column can hold one form; returning midnight UTC keeps every one of
+ * those readers and filters correct, whereas a WIB-midnight instant (17:00Z the
+ * day before) reads as the previous day and falls out of its own month.
+ *
+ * `month` is zero-based (0-11); `Date.UTC` rolls an over-large `day` into the
+ * next month, as `new Date(year, month, day)` did.
  */
 export function wibDate(year: number, month: number, day: number): Date {
-  return new Date(Date.UTC(year, month, day) - 7 * 60 * 60 * 1000);
+  return new Date(Date.UTC(year, month, day));
+}
+
+/** A calendar month as the date-only bounds its column uses: `[start, end)` at
+ * midnight UTC — the form `wibDate` writes for a date-only column. */
+export function utcMonthRange(year: number, month: number): { start: Date; end: Date } {
+  const nextYear = month === 11 ? year + 1 : year;
+  const nextMonth = (month + 1) % 12;
+  return {
+    start: new Date(Date.UTC(year, month, 1)),
+    end: new Date(Date.UTC(nextYear, nextMonth, 1)),
+  };
 }
 
 /** A `@db.Date` value as a date input shows it. */

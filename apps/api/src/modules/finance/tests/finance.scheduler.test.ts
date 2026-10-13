@@ -147,8 +147,8 @@ describe('Finance Scheduler Unit Tests - Auto Billing', () => {
         await generateRecurringBills(new Date('2026-07-31T21:00:00Z')); // 1 Aug WIB
 
         expect(vi.mocked(prisma.invoice.findFirst).mock.calls[0][0]?.where?.dueDate).toEqual({
-          gte: new Date('2026-07-31T17:00:00.000Z'),
-          lt: new Date('2026-08-31T17:00:00.000Z'),
+          gte: new Date('2026-08-01T00:00:00.000Z'),
+          lt: new Date('2026-09-01T00:00:00.000Z'),
         });
       } finally {
         if (prevTz === undefined) delete process.env.TZ;
@@ -190,9 +190,9 @@ describe('Finance Scheduler Unit Tests - Auto Billing', () => {
         const at = new Date('2026-07-31T21:00:00Z'); // 1 Aug WIB
         await generateRecurringBills(at);
         expect(stored).toHaveLength(1);
-        // 10 August 00:00 WIB, inside the guard even though a UTC+8 local
-        // construction would put it at 2026-08-09T16:00Z.
-        expect(stored[0].dueDate.toISOString()).toBe('2026-08-09T17:00:00.000Z');
+        // 10 August as a date-only value; a UTC+8 local construction would put
+        // it at 2026-08-09T16:00Z, outside the guard.
+        expect(stored[0].dueDate.toISOString()).toBe('2026-08-10T00:00:00.000Z');
 
         const second = await generateRecurringBills(at);
         expect(stored).toHaveLength(1);

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { wibMonthYear, wibMonthRange, wibDate } from './wib-day';
+import { wibMonthYear, wibDate, utcMonthRange } from './wib-day';
 
 // The WIB helpers must derive the calendar from the instant alone, never from
 // the host clock. Production runs the API container in UTC; a developer's
@@ -25,31 +25,6 @@ describe('wibMonthYear', () => {
   });
 });
 
-describe('wibMonthRange', () => {
-  beforeAll(() => {
-    process.env.TZ = 'UTC';
-  });
-  afterAll(() => {
-    if (prevTz === undefined) delete process.env.TZ;
-    else process.env.TZ = prevTz;
-  });
-
-  it('builds the bounds from an explicit +07:00 offset', () => {
-    // 00:00 WIB on 1 August is 2026-07-31T17:00Z; 00:00 WIB on 1 September is
-    // 2026-08-31T17:00Z. A local `new Date(2026, 7, 1)` on a UTC server would
-    // resolve to 00:00Z, seven hours late.
-    const { start, end } = wibMonthRange(2026, 7);
-    expect(start.toISOString()).toBe('2026-07-31T17:00:00.000Z');
-    expect(end.toISOString()).toBe('2026-08-31T17:00:00.000Z');
-  });
-
-  it('rolls over from December to January of the next year', () => {
-    const { start, end } = wibMonthRange(2026, 11);
-    expect(start.toISOString()).toBe('2026-11-30T17:00:00.000Z');
-    expect(end.toISOString()).toBe('2026-12-31T17:00:00.000Z');
-  });
-});
-
 describe('wibDate', () => {
   beforeAll(() => {
     process.env.TZ = 'UTC';
@@ -59,8 +34,11 @@ describe('wibDate', () => {
     else process.env.TZ = prevTz;
   });
 
-  it('returns 00:00 WIB of the given day', () => {
-    expect(wibDate(2026, 7, 10).toISOString()).toBe('2026-08-09T17:00:00.000Z');
+  it('returns the date-only value a dueDate column holds: midnight UTC', () => {
+    // The value readers stringify without a timezone, so a later local-midnight
+    // instant (which is 17:00Z the day before) would render one day early.
+    expect(wibDate(2026, 7, 10).toISOString()).toBe('2026-08-10T00:00:00.000Z');
+    expect(wibDate(2026, 7, 1).toISOString()).toBe('2026-08-01T00:00:00.000Z');
   });
 
   it('is the same instant on any server timezone', () => {
@@ -71,15 +49,34 @@ describe('wibDate', () => {
     const newYork = wibDate(2026, 7, 1);
     process.env.TZ = 'UTC';
 
-    // 2026-07-31T17:00Z, i.e. 00:00 WIB on 1 August — inside that WIB month
-    // ([2026-07-31T17:00Z, 2026-08-31T17:00Z)). A local `new Date(2026, 7, 1)`
-    // on UTC+8 gives 2026-07-31T16:00Z, one hour before the month starts.
-    expect(utc.toISOString()).toBe('2026-07-31T17:00:00.000Z');
+    expect(utc.toISOString()).toBe('2026-08-01T00:00:00.000Z');
     expect(makassar.getTime()).toBe(utc.getTime());
     expect(newYork.getTime()).toBe(utc.getTime());
   });
 
   it('rolls an over-large day into the next month, as the local constructor did', () => {
-    expect(wibDate(2026, 7, 32).toISOString()).toBe('2026-08-31T17:00:00.000Z');
+    expect(wibDate(2026, 7, 32).toISOString()).toBe('2026-09-01T00:00:00.000Z');
+  });
+});
+
+describe('utcMonthRange', () => {
+  beforeAll(() => {
+    process.env.TZ = 'UTC';
+  });
+  afterAll(() => {
+    if (prevTz === undefined) delete process.env.TZ;
+    else process.env.TZ = prevTz;
+  });
+
+  it('bounds a date-only column month at midnight UTC', () => {
+    const { start, end } = utcMonthRange(2026, 7);
+    expect(start.toISOString()).toBe('2026-08-01T00:00:00.000Z');
+    expect(end.toISOString()).toBe('2026-09-01T00:00:00.000Z');
+  });
+
+  it('rolls over from December to January of the next year', () => {
+    const { start, end } = utcMonthRange(2026, 11);
+    expect(start.toISOString()).toBe('2026-12-01T00:00:00.000Z');
+    expect(end.toISOString()).toBe('2027-01-01T00:00:00.000Z');
   });
 });
