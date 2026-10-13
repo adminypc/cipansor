@@ -26,6 +26,8 @@ Usage:
     OPENHANDS_API_KEY=... python3 scripts/deploy-sdlc-agents.py            # dry run
     OPENHANDS_API_KEY=... DEPLOY=true python3 scripts/deploy-sdlc-agents.py
     OPENHANDS_API_KEY=... DEPLOY=true ONLY="SDLC 15" python3 scripts/deploy-sdlc-agents.py
+    # Rebuild from untruncated prompts (repairs a prompt that already lost its tail):
+    OPENHANDS_API_KEY=... DEPLOY=true ORIGINALS=/tmp/originals.json python3 scripts/deploy-sdlc-agents.py
 """
 import io
 import json
@@ -121,13 +123,13 @@ def req(method, path, data=None, raw=False):
         return payload if raw else json.loads(payload or b"{}")
 
 
-def split_tail(prompt):
-    i = prompt.find(TAIL_MARK)
-    return prompt[:i] if i >= 0 else prompt
-
-
 def new_prompt(name, prompt):
-    head = split_tail(prompt)
+    # Capture the original tail before touching the head: inserting BODY_BLOCK
+    # grows the head, so `prompt[len(head):]` would slice past the old tail and
+    # silently drop it (the bug that truncated 23 of 24 prompts).
+    tail_start = prompt.find(TAIL_MARK)
+    orig_tail = prompt[tail_start:] if tail_start >= 0 else ""
+    head = prompt[:tail_start] if tail_start >= 0 else prompt
     # Insert the BODY block once, right after the footer paragraph.
     if BODY_MARK not in head:
         anchor = "_This comment was created by an AI agent (OpenHands) on behalf of the maintainer._"
@@ -139,10 +141,9 @@ def new_prompt(name, prompt):
             head = BODY_BLOCK + "\n" + head
     tail = next((v for k, v in TAILS.items() if k in name), None)
     if tail is None:
-        # Keep the original tail (so its behaviour is unchanged) and append the
-        # body/reaction reminders that apply to every automation.
-        orig = prompt[len(head):]
-        return head + orig
+        # Keep the original tail verbatim (its behaviour is unchanged); only the
+        # head gained the body/reaction reminders that apply to every automation.
+        return head + orig_tail
     return head + tail
 
 
@@ -174,6 +175,14 @@ def upload(data, name):
 if __name__ == "__main__":
     if not KEY:
         sys.exit("OPENHANDS_API_KEY is not set")
+    # A JSON map {name: original prompt}. When the live prompt has already lost
+    # its tail (the bug this script used to have), the live prompt cannot be the
+    # base — new_prompt is idempotent and would keep the truncated head. Passing
+    # the originals lets the run rebuild from the untruncated prompt.
+    originals = {}
+    if os.environ.get("ORIGINALS"):
+        with open(os.environ["ORIGINALS"]) as f:
+            originals = json.load(f)
     autos = req("GET", "/")["automations"]
     print(f"{len(autos)} automation(s); DEPLOY={DEPLOY} ONLY={ONLY or '(all)'}")
     for a in autos:
@@ -182,7 +191,8 @@ if __name__ == "__main__":
             continue
         aid = a["id"]
         old = a.get("prompt") or ""
-        new = new_prompt(name, old)
+        base = originals.get(name, old)
+        new = new_prompt(name, base)
         changed = new != old
         print(f"- {name}: {'changed' if changed else 'already current'}")
         if not changed or not DEPLOY:

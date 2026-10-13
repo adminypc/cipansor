@@ -146,7 +146,8 @@ setiap prompt dan dijaga workflow deterministik):
   ditulis ke **body** issue/PR di bawah penanda tetap (`<!-- sdlc:… -->`),
   diperbarui di tempat, bukan tersebar di komentar.
 - **Basmalah.** Setiap body dibuka dengan «بِسْمِ اللَّهِ الرَّحْمَنِ الرَّحِيمِ»;
-  form issue dan templat PR membawanya, `basmalah.yml` menambahkannya bila lupa.
+  templat PR membawanya, form issue menampilkannya sebagai petunjuk (blok
+  `markdown` form tidak ikut ke body), dan `basmalah.yml` menambahkannya bila lupa.
 - **`ready` eksklusif dan kuat.** `ready` hanya bila sangat yakin, tanpa
   pertanyaan terbuka, dan tidak pernah bersama `question`/`needs-info`/
   `pending-maintainer` (#814). Kritik habis-habisan dulu, baru `ready`.

@@ -43,27 +43,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-        run: |
-          ev="$GITHUB_EVENT_PATH"
-          body=$(jq -r '.comment.body // ""' "$ev")
-          author=$(jq -r '.comment.author_association // ""' "$ev")
-          labels=$(jq -r '[.issue.labels[].name] | join(",")' "$ev")
-          number=$(jq -r '.issue.number' "$ev")
-          cid=$(jq -r '.comment.id' "$ev")
-
-          # Never acknowledge the bot's own comment — the anti-loop guard the
-          # whole fleet uses.
-          case "$body" in
-            *"This comment was created by an AI agent"*) echo "Bot's own comment; nothing to do."; exit 0 ;;
-          esac
-
-          react=0
-          case "$body" in *"@openhands"*) react=1 ;; esac
-          case ",$labels," in
-            *,needs-info,* | *,pending-maintainer,*)
-              case "$author" in OWNER | MEMBER | COLLABORATOR) react=1 ;; esac ;;
-          esac
-          [ "$react" = "1" ] || { echo "No comment-triggered automation will run; nothing to do."; exit 0; }
-
-          sh .github/scripts/reaction.sh "$number" "$cid"
+        run: sh .github/scripts/acknowledge.sh --stdin < "$GITHUB_EVENT_PATH"
 

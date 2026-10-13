@@ -81,8 +81,10 @@
       (`<!-- sdlc:… -->`) dan diperbarui di tempat, bukan tersebar di komentar
       yang membuat yang final sulit ditemukan.
     - **Basmalah.** Setiap body dibuka dengan «بِسْمِ اللَّهِ الرَّحْمَنِ الرَّحِيمِ»;
-      form issue dan templat PR membawanya, `basmalah.yml` menambahkannya bila
-      lupa (idempoten).
+      templat PR membawanya di body, form issue hanya menampilkannya sebagai
+      petunjuk (blok `markdown` form tidak ikut ke body), dan `basmalah.yml`
+      menambahkannya bila lupa (idempoten; body dibaca ulang tepat sebelum PATCH
+      agar ringkasan `<!-- sdlc:… -->` yang mendarat bersamaan tidak tertimpa).
     - **`ready` kuat dan eksklusif.** `ready` hanya bila sangat yakin, tanpa
       pertanyaan terbuka; tidak pernah bersama `question`/`needs-info`/
       `pending-maintainer` (#814). Kritik habis-habisan dulu, baru `ready`.

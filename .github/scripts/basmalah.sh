@@ -42,19 +42,36 @@ case "$ACTION" in
 esac
 [ -n "$NUMBER" ] || { echo "No issue number in the event; nothing to do."; exit 0; }
 
-BODY=$(gh api "repos/$REPO/issues/$NUMBER" --jq '.body // ""' 2>/dev/null) \
-  || { echo "::warning::could not read the body of #$NUMBER."; exit 0; }
+# Read the body, prepend the basmalah, and write it back.
+#
+# GitHub offers no conditional write here (the REST issue object has no
+# `version` field, and `If-Match` is rejected with 400), so the body is re-read
+# immediately before the PATCH: if an automation wrote its `<!-- sdlc:… -->`
+# summary between the first read and the write, the basmalah is prepended to the
+# fresh body instead of overwriting the summary with the stale copy. This
+# narrows the window to the PATCH call itself — the closest a compare-and-swap
+# can get without an atomic API.
+read_body() { gh api "repos/$REPO/issues/$NUMBER" --jq '.body // ""' 2>/dev/null; }
+opens_with_basmalah() {
+  h=$(printf '%s' "$1" | sed '/./,$!d' | head -n 1)
+  [ "$h" = "$ARABIC" ] || [ "$h" = "$TRANSLIT" ]
+}
 
-# Already opens with one of the accepted lines (ignoring leading blank lines).
-HEAD=$(printf '%s' "$BODY" | sed '/./,$!d' | head -n 1)
-if [ "$HEAD" = "$ARABIC" ] || [ "$HEAD" = "$TRANSLIT" ]; then
+BODY=$(read_body) || { echo "::warning::could not read the body of #$NUMBER."; exit 0; }
+if opens_with_basmalah "$BODY"; then
   echo "#$NUMBER already opens with the basmalah; nothing to do."
+  exit 0
+fi
+
+FRESH=$(read_body) || FRESH="$BODY"
+if opens_with_basmalah "$FRESH"; then
+  echo "#$NUMBER already opens with the basmalah (written concurrently); nothing to do."
   exit 0
 fi
 
 NEW="$ARABIC
 
-$BODY"
+$FRESH"
 # Assemble the JSON with jq (a body with quotes or newlines survives) and send
 # it with --input, so the body is never mangled by shell word splitting.
 TMP=$(mktemp)

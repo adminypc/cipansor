@@ -62,31 +62,64 @@ fi
 # `ready` is a strong claim and it is exclusive: it must never sit beside a label
 # that says the issue is still being discussed or decided (#814 carried `ready`
 # and `question` together, which makes the machine-readable state ambiguous).
-# Remove the premature `ready` whichever account added it — this runs before the
-# actor checks, because the contradiction is wrong even when the bot made it.
 # `question`, `needs-info` and `pending-maintainer` all win over `ready`.
+#
+# This runs on every `labeled` event and has to compose with the standard path
+# below (which revokes the event's label when an unauthorized account applied
+# it):
+#   - the event label is one of the exclusions and the standard path will revoke
+#     it (human actor) -> that revocation resolves the conflict; leave `ready`;
+#   - otherwise, if `ready` coexists with an exclusion, `ready` is the defect to
+#     remove — whoever added it, and whether the event was `ready` itself or an
+#     unrelated label that merely happened to arrive while the conflict existed.
 READY_MARK="<!-- label-guard:ready-exclusive -->"
+is_exclusion=0
+for excl in question needs-info pending-maintainer; do
+  [ "$LABEL" = "$excl" ] && is_exclusion=1
+done
+# Will the standard path revoke the event's own label (unauthorized actor,
+# protected, not a human-decision label)?
+revoke_event_label=0
+if [ "$ACTOR" != "$BOT_LOGIN" ]; then
+  case "$ACTOR" in
+    *'[bot]') ;;
+    *)
+      if ! printf '%s\n' $EXEMPT_LABELS | grep -qxF "$LABEL" \
+        && protected_labels | grep -qxF "$LABEL"; then
+        revoke_event_label=1
+      fi
+      ;;
+  esac
+fi
+
 current=$(gh api "repos/$REPO/issues/$NUMBER/labels" --jq '.[].name' 2>/dev/null || true)
+conflict=""
 if printf '%s\n' "$current" | grep -qxF ready; then
   for excl in question needs-info pending-maintainer; do
-    if printf '%s\n' "$current" | grep -qxF "$excl"; then
-      if ! gh api -X DELETE "repos/$REPO/issues/$NUMBER/labels/ready" >/dev/null 2>&1; then
-        echo "::error::Could not remove the contradictory 'ready' label from #$NUMBER."
-        exit 1
-      fi
-      echo "Removed 'ready' from #$NUMBER: it contradicts '$excl'."
-      if ! gh api --paginate "repos/$REPO/issues/$NUMBER/comments?per_page=100" \
-          --jq '.[].body' 2>/dev/null | grep -qF "$READY_MARK"; then
-        RBODY="Label \`ready\` dicabut dari #$NUMBER karena bertentangan dengan \`$excl\`: issue yang masih punya pertanyaan terbuka atau menunggu keputusan belum siap dikerjakan. \`ready\` hanya diberikan bila sangat yakin — tanpa pertanyaan terbuka. Hilangkan dulu \`$excl\`-nya (jawab pertanyaannya, atau putuskan), lalu \`ready\` boleh dipasang lagi.
+    printf '%s\n' "$current" | grep -qxF "$excl" && conflict="$excl"
+  done
+fi
+# The standard path resolves it only when it is about to remove an exclusion.
+if [ -n "$conflict" ] && ! { [ "$revoke_event_label" = "1" ] && [ "$is_exclusion" = "1" ]; }; then
+  if ! gh api -X DELETE "repos/$REPO/issues/$NUMBER/labels/ready" >/dev/null 2>&1; then
+    echo "::error::Could not remove the contradictory 'ready' label from #$NUMBER."
+    exit 1
+  fi
+  echo "Removed 'ready' from #$NUMBER: it contradicts '$conflict'."
+  if ! gh api --paginate "repos/$REPO/issues/$NUMBER/comments?per_page=100" \
+      --jq '.[].body' 2>/dev/null | grep -qF "$READY_MARK"; then
+    RBODY="Label \`ready\` dicabut dari #$NUMBER karena bertentangan dengan \`$conflict\`: issue yang masih punya pertanyaan terbuka atau menunggu keputusan belum siap dikerjakan. \`ready\` hanya diberikan bila sangat yakin — tanpa pertanyaan terbuka. Hilangkan dulu \`$conflict\`-nya (jawab pertanyaannya, atau putuskan), lalu \`ready\` boleh dipasang lagi.
 
 $AI_FOOTER
 $READY_MARK"
-        gh api "repos/$REPO/issues/$NUMBER/comments" -f body="$RBODY" >/dev/null \
-          || echo "::warning::could not post the ready-conflict notice on #$NUMBER."
-      fi
-      exit 0
-    fi
-  done
+    gh api "repos/$REPO/issues/$NUMBER/comments" -f body="$RBODY" >/dev/null \
+      || echo "::warning::could not post the ready-conflict notice on #$NUMBER."
+  fi
+  # If the event label was `ready` itself, it is gone; otherwise fall through so
+  # the standard path also deals with the event's label.
+  if [ "$LABEL" = "ready" ]; then
+    exit 0
+  fi
 fi
 
 # The bot and any GitHub App may label.

@@ -149,9 +149,11 @@ sync` workflow adds anything missing and **fails the check** when the type
 11. **Every main description opens with the basmalah.** Each issue and pull
     request body starts with «بِسْمِ اللَّهِ الرَّحْمَنِ الرَّحِيمِ»
     (`Bismillaahirrohmaanirrohiim` where Arabic cannot be typed), then a blank
-    line. The issue forms and the pull-request template carry it, the automations
-    are told to open their own bodies with it, and the `Basmalah` workflow
-    prepends it to a description that lacks it (idempotent — it never stacks).
+    line. The pull-request template carries it in the body; the issue forms show
+    it as a visible prompt (a form's `markdown` block is preview only and never
+    lands in the body), so for issues the `Basmalah` workflow is what puts it
+    there — it prepends the line to a description that lacks it (idempotent — it
+    never stacks), and the automations are told to open their own bodies with it.
 
 12. **An automation acknowledges before it works.** The fleet reacts `👀` on the
     issue, pull request, or comment it is about to handle — a comment trigger
