@@ -143,7 +143,7 @@ flowchart TD
   TR -- keamanan --> ADV["advisory privat"]:::human
   TR -- needs-info --> CL["Penjernih issue"]:::cloud --> TR
   TR -- decision --> DEC["riset + pilihan ganda"]:::cloud --> MD{"maintainer memilih"}:::human --> TR
-  TR -- ready --> Q["antrean WIP ≤ 3"]:::gh --> IMP["Tiket jadi PR"]:::cloud
+  TR -- ready --> HO["penyerahan: label bot-implement"]:::gh --> IMP["Tiket jadi PR"]:::cloud
   IMP --> CI["CI + E2E"]:::gh --> LC{"pr-lifecycle: hijau + ready?"}:::gh
   LC -- ya --> GT["Gerbang tinjau PR"]:::cloud
   GT -- "minta perubahan (≤ 3 putaran)" --> IMP
@@ -163,7 +163,7 @@ flowchart TD
 | 2 | Triase | `issues.opened` | `Pelabel issue` | **satu** komentar: tipe, prioritas (berbukti), duplikat, kesiapan, estimasi | label `ready` / `needs-info` / `question` / `decision` / `duplicate` |
 | 3 | Klarifikasi | balasan pelapor pada `needs-info`, label bot, atau aktivitas baru (jembatan triase) | `Penjernih issue` / `Triase bug` | komentar penilaian ulang; body issue diperbarui hanya saat `ready` | `ready` |
 | 4 | Keputusan | label `decision` | agen riset → maintainer | riset bersumber + pilihan ganda; maintainer memilih | keputusan tercatat di `.claude/memory/decisions/`, lalu `ready` |
-| 5 | Implementasi | `ready` dan antrean WIP < 3 | `Tiket jadi PR` | PR draf dengan templat, uji, bukti, `Fixes #n` | daftar periksa penulis lengkap → ready for review |
+| 5 | Implementasi | label `bot-implement` (`Bot sebutan`, atau maintainer); `ready` saja TIDAK memicu bot | `Tiket jadi PR` | PR draf dengan templat, uji, bukti, `Fixes #n` | daftar periksa penulis lengkap → ready for review |
 | 6 | CI | push | Actions | Build, Lint, Tests, Security, E2E | semua hijau |
 | 7 | Tinjauan | `pr-lifecycle.sh` (hijau + ready; `workflow_run` atau `ready_for_review`) | `Gerbang tinjau PR` | satu review per head, dengan blok `suggestion` | approve |
 | 8 | Perbaikan | review minta perubahan | `Tiket jadi PR` | ikuti atau tolak dengan alasan; ≤ 3 putaran | head baru hijau → tahap 7 |

@@ -632,6 +632,16 @@ describe('fleet contracts', () => {
     expect(flow).toMatch(/komentar dulu|Komentar dulu/);
     expect(flow).toContain('`ready`');
   });
+
+  it('states in docs/SDLC-FLOW.md that `bot-implement`, not `ready`, triggers implementation', () => {
+    // A `ready` issue with a maintainer comment asking for a PR got no bot: the
+    // trigger is the `bot-implement` label (SDLC 06). The flow doc must say so,
+    // or a reader waits on `ready` that was never going to start anything.
+    const flow = read(join(REPO_ROOT, 'docs', 'SDLC-FLOW.md'));
+    const stage5 = flow.slice(flow.indexOf('| 5 | Implementasi'), flow.indexOf('| 6 | CI'));
+    expect(stage5).toContain('bot-implement');
+    expect(stage5).toMatch(/`ready` saja TIDAK memicu/);
+  });
 });
 
 describe('deploy-sdlc-agents.py', () => {
