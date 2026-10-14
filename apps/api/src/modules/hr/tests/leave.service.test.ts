@@ -96,6 +96,7 @@ vi.mock('../../../lib/prisma', () => ({ prisma: prismaMock }));
 
 import {
   createLeave,
+  updateLeave,
   approveLeave,
   cancelLeave,
   deleteLeave,
@@ -725,6 +726,93 @@ describe('approveLeave', () => {
 
     expect(db.leaveBalance.update.mock.calls.length).toBe(balanceWrites);
     expect(db.staffAttendance.findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('updateLeave', () => {
+  it('moves the dates of a pending leave with a guarded write', async () => {
+    db.leave.findUnique.mockResolvedValue(leaveRow({ status: LeaveStatus.PENDING }));
+    db.leave.findUniqueOrThrow.mockResolvedValue(
+      leaveRow({
+        status: LeaveStatus.PENDING,
+        startDate: new Date('2026-01-10T00:00:00.000Z'),
+        endDate: new Date('2026-01-11T00:00:00.000Z'),
+        totalDays: 2,
+      })
+    );
+
+    const result = await updateLeave('leave-1', {
+      startDate: '2026-01-10T00:00:00.000Z',
+      endDate: '2026-01-11T00:00:00.000Z',
+    });
+
+    // The move is guarded on PENDING, so a decision committing between the read
+    // and the write cannot be overwritten by the edit.
+    expect(db.leave.updateMany).toHaveBeenCalledWith({
+      where: { id: 'leave-1', status: LeaveStatus.PENDING },
+      data: expect.objectContaining({
+        startDate: new Date('2026-01-10T00:00:00.000Z'),
+        endDate: new Date('2026-01-11T00:00:00.000Z'),
+        totalDays: 2,
+      }),
+    });
+    // The unconditional `update` is gone, and the row reported for the edit is
+    // read inside the same transaction the write locked.
+    expect(db.leave.update).not.toHaveBeenCalled();
+    expect(result.totalDays).toBe(2);
+  });
+
+  it('refuses to edit a leave that is no longer pending', async () => {
+    // An approval already debited the balance and marked attendance for the
+    // dates it read; moving those dates now would leave the two disagreeing.
+    db.leave.findUnique.mockResolvedValue(leaveRow({ status: LeaveStatus.APPROVED }));
+
+    await expect(
+      updateLeave('leave-1', {
+        startDate: '2026-01-10T00:00:00.000Z',
+        endDate: '2026-01-11T00:00:00.000Z',
+      })
+    ).rejects.toThrow(/sudah diputuskan/i);
+
+    expect(db.leave.updateMany).not.toHaveBeenCalled();
+    expect(db.leave.update).not.toHaveBeenCalled();
+  });
+
+  it('refuses an edit whose pending status was decided before the guarded write', async () => {
+    // The read saw PENDING, but an approval committed before the guarded write.
+    // `updateMany` is modelled on the row store: the store now holds APPROVED,
+    // so the guarded write matches nothing and the edit is refused rather than
+    // moving the dates an approval has already debited and marked attendance
+    // for. It is the `status: PENDING` predicate on the write that guards the
+    // change — a read inside a transaction takes no row lock, so a decision can
+    // still land between the read and the write.
+    db.leave.findUnique.mockImplementation(async () => {
+      // Read with `tx`, not `prisma`, so the guard and the validation see the
+      // row this transaction will target.
+      expect(db.__store.inTransaction).toBe(true);
+      return leaveRow({ status: LeaveStatus.PENDING });
+    });
+    db.leave.updateMany.mockImplementation(
+      async ({ where }: { where: { status?: LeaveStatus } }) => {
+        // An approval commits while this edit is in flight, between the read and
+        // the guarded write: the row the edit would write is no longer PENDING.
+        db.__store.leaveStatus = LeaveStatus.APPROVED;
+        if (where.status && db.__store.leaveStatus !== where.status) return { count: 0 };
+        return { count: 1 };
+      }
+    );
+
+    await expect(
+      updateLeave('leave-1', {
+        startDate: '2026-01-10T00:00:00.000Z',
+        endDate: '2026-01-11T00:00:00.000Z',
+      })
+    ).rejects.toThrow(/sudah diputuskan/i);
+
+    // The edit wrote nothing: no unconditional `update`, no re-read of a row it
+    // does not own.
+    expect(db.leave.update).not.toHaveBeenCalled();
+    expect(db.leave.findUniqueOrThrow).not.toHaveBeenCalled();
   });
 });
 

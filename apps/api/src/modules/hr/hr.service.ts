@@ -2531,7 +2531,19 @@ export async function updateLeave(id: string, data: UpdateLeaveInput) {
     const leave = await tx.leave.findUnique({ where: { id } });
     if (!leave) throw Errors.notFound('Leave request not found');
 
-    const updateData: Prisma.LeaveUpdateInput = {
+    // Only a PENDING request may be edited. An approval has already debited the
+    // balance and marked attendance for the dates it read; moving those dates
+    // now would leave the two disagreeing, and cancelling would only undo the
+    // days it marked. This read is inside the transaction so the guard and the
+    // validation below see the same row the guarded write will target — it does
+    // not lock that row, so a decision can still land before the write.
+    if (leave.status !== LeaveStatus.PENDING) {
+      throw Errors.conflict(
+        'Cuti yang sudah diputuskan tidak dapat diubah. Muat ulang halaman untuk melihat status terbarunya.'
+      );
+    }
+
+    const updateData: Prisma.LeaveUpdateManyMutationInput = {
       type: data.type,
       reason: data.reason,
     };
@@ -2565,7 +2577,24 @@ export async function updateLeave(id: string, data: UpdateLeaveInput) {
       });
     }
 
-    return tx.leave.update({ where: { id }, data: updateData });
+    // Guarded on PENDING, like the approval and cancellation paths. The guard
+    // above read the row before this write held any lock on it — a SELECT inside
+    // a transaction takes no row lock — so an approval or cancellation may have
+    // committed since. Writing only while the row is still PENDING is what makes
+    // the winner the only writer: an edit that read a stale PENDING (and would
+    // otherwise move the dates an approval already marked attendance for)
+    // matches no row and is refused instead.
+    const { count } = await tx.leave.updateMany({
+      where: { id, status: LeaveStatus.PENDING },
+      data: updateData,
+    });
+    if (count !== 1) {
+      throw Errors.conflict(
+        'Cuti yang sudah diputuskan tidak dapat diubah. Muat ulang halaman untuk melihat status terbarunya.'
+      );
+    }
+
+    return tx.leave.findUniqueOrThrow({ where: { id } });
   });
 }
 
