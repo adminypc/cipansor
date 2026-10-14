@@ -59,6 +59,7 @@ the mechanical cases.
 ## Lessons — traps that already cost time
 
 - [guard-tests-that-measure-the-wrong-thing](lessons/guard-tests-that-measure-the-wrong-thing.md) — "what would have to change for this test to go red?"; chains with no root; fuzz against invariants; a test that skips itself; a scanner blind to the defect's shape; a suite that signs in as someone who cannot be refused; an absence assertion that retries until the thing goes away
+- [deploy-script-idempotence-traps](lessons/deploy-script-idempotence-traps.md) — a slice with a stale length dropped 23 of 24 automation prompt tails; idempotent is not repairable; recover originals from the tarball
 - [teacher-dashboard-fake-stats](lessons/teacher-dashboard-fake-stats.md) — four kinds of figures that lie, and how to find each
 - [generated-docs-need-machine-checks](lessons/generated-docs-need-machine-checks.md) — a green build and a self-review said "compliant" over a document with every table destroyed, invented routes and a wrong job count; check claims against the code and open the artefact
 - [breadth-over-depth](lessons/breadth-over-depth.md) — built wider than used; walk a real journey end to end
@@ -75,6 +76,7 @@ the mechanical cases.
 - [branch-switch-stale-artifacts](lessons/branch-switch-stale-artifacts.md) — rebuild `shared` and regenerate Prisma after checkout or stash
 - [pnpm-install-silently-installs-nothing](lessons/pnpm-install-silently-installs-nothing.md) — exit 0, nothing installed; `CI=true`
 - [audit-deps-fails-on-time-not-diff](lessons/audit-deps-fails-on-time-not-diff.md) — the Security job reds on the date, and greens without checking
+- [pnpm-12-second-permission-surface](lessons/pnpm-12-second-permission-surface.md) — `allowBuilds` covers build scripts only; dependency agent skills are a second surface, decided in `permissions`, guarded statically + by `pnpm permissions list`
 - [github-actions-minutes-exhausted](lessons/github-actions-minutes-exhausted.md) — a 2-second job with no steps is a billing wall; read the annotation
 - [gh-cli-and-shell-traps](lessons/gh-cli-and-shell-traps.md) — `gh pr edit` does nothing; unquoted heredocs run backticks; all green yet BLOCKED = a CodeQL category missing
 - [docker-image-size-traps](lessons/docker-image-size-traps.md) — Prisma's optional peer, `chown -R`, recursive `*.sql` in `.dockerignore`

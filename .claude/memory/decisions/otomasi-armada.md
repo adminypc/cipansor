@@ -68,6 +68,66 @@
     dan PR pindah ke GitHub App `cipansor-contributor-bot` (izin minimal, token
     per run). `cipansor-bot` tetap akun penyetuju, karena approval dari akun
     ber-izin write terbukti dihitung ruleset.
+16. **Armada mengakui, memusatkan kesimpulan, dan tidak melabeli sendiri**
+    (2026-10-13, pengguna). Lima aturan yang dipasang di setiap prompt dan
+    dijaga workflow deterministik (`docs/LABELS.md` aturan 8–12, `docs/SDLC-FLOW.md`
+    invarian 14–17, `docs/IDEAS.md`):
+    - **Mengakui dulu.** Reaction 👀 pada objek yang ditangani, supaya orang
+      melihat automation bekerja sebelum jawabannya tiba. Pemicu komentar
+      dijaga `acknowledge.yml` (hanya saat automation akan benar-benar jalan);
+      automation lain melakukannya dari promptnya.
+    - **Komentar dulu, body saat `ready`.** (2026-10-14, pengguna; menggantikan
+      "Satu deskripsi" versi 2026-10-13.) Selama issue belum `ready`, triase,
+      estimasi, kriteria, dan pertanyaan terbuka ditulis sebagai **komentar**
+      (percakapan kerja); **body** issue diperbarui hanya saat bot memasang
+      `ready`, dengan ringkasan final di bawah penanda tetap
+      (`<!-- sdlc:triase -->`). PR tetap: putusan tinjauan/QA ke **body** PR di
+      bawah penanda (`<!-- sdlc:gerbang -->`). Pemicunya: issue #818 — body
+      terisi kesimpulan bot sejak putaran pertama, dan tidak ada yang memicu
+      `issues.edited`, jadi suntingan deskripsi oleh manusia tak ditanggapi.
+    - **Prioritas berbukti.** Prioritas dinilai dari dampak, urgensi, dan risiko;
+      apa pun di atas `medium` wajib menyebut bukti konkret, tanpa bukti
+      maksimum `medium`, bila ragu pilih yang lebih rendah. `critical` hanya
+      untuk layanan mati total, kehilangan/korupsi data, atau masalah
+      keamanan/privacy (UU PDP) yang aktif bisa dieksploitasi. Jangan
+      menginflasi `critical`. (2026-10-14, pengguna.)
+    - **Triase ulang lewat jembatan, bukan `issues.edited`.** Tak satu pun
+      automation memicu `issues.edited`. `issue-triage-bridge.yml` +
+      `.github/scripts/issue-triage-bridge.sh` mendispatch pemilik triase saat
+      bot memasang label tipe/prioritas dan saat **sinyal aktivitas** sebuah
+      issue belum `ready` berubah sejak checkpoint terakhir. Sinyalnya adalah
+      hash isi — body issue plus tiap komentar bukan-armada (penulis +
+      `updated_at` + body) — sehingga suntingan deskripsi, komentar baru, atau
+      komentar yang disunting semuanya terdeteksi, termasuk suntingan pada detik
+      yang sama dengan penulisan penanda (perbandingan timestamp beresolusi detik
+      dulu menelannya). Komentar armada sendiri (`*[bot]`, `cipansor-bot`)
+      dikecualikan agar bot tidak memicu triase ulang dirinya. Idempoten (penanda
+      per keadaan tipe+prioritas, dan penanda sweep per sinyal). **Deskripsi PR
+      tidak ditanggapi otomatis** — tidak ada pemicu `pull_request.edited`;
+      gerbang tinjau sudah membaca deskripsi, issue, diff, dan semua komentar.
+      (2026-10-14, pengguna; menutup #818.)
+    - **Basmalah.** Setiap body dibuka dengan «بِسْمِ اللَّهِ الرَّحْمَنِ الرَّحِيمِ»;
+      templat PR membawanya di body, form issue hanya menampilkannya sebagai
+      petunjuk (blok `markdown` form tidak ikut ke body), dan `basmalah.yml`
+      menambahkannya bila lupa (idempoten; body dibaca ulang tepat sebelum PATCH
+      agar ringkasan `<!-- sdlc:… -->` yang mendarat bersamaan tidak tertimpa).
+    - **`ready` kuat dan eksklusif.** `ready` hanya bila sangat yakin, tanpa
+      pertanyaan terbuka; tidak pernah bersama `question`/`needs-info`/
+      `pending-maintainer` (#814). Kritik habis-habisan dulu, baru `ready`.
+      `label-guard.sh` mencabut `ready` yang bertentangan, dari akun mana pun.
+      Konflik dihitung dari himpunan label **efektif**: label pada event
+      diabaikan hanya bila jalur standar memang akan mencabutnya, sehingga
+      exclusion **lain** yang tersisa (mis. `ready`+`needs-info` saat manusia
+      menambah `question`) tetap membuat `ready` dicabut (temuan tinjauan
+      PR #817, 2026-10-13).
+    - **Hanya `cipansor-bot` melabeli.** Label yang dipasang akun lain dicabut
+      `label-guard.yml` dan pelakunya diberi tahu sekali; label keputusan
+      manusia (`rilis-disetujui`, `rilis-ditolak`, `bot-implement`) tetap boleh
+      manual. Automasi membaca label, jadi label manual membuat keduanya
+      berbeda pendapat.
+    Prompt dan tarball runner 24 automation diperbarui lewat
+    `scripts/deploy-sdlc-agents.py` (idempoten; `main.py`/`setup.sh` tidak
+    disentuh).
 
 ## Sumber
 
