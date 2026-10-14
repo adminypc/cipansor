@@ -2603,14 +2603,38 @@ export async function approveLeave(id: string, approverId: string, data: Approve
       ...(data.rejectedNote ? { rejectedNote: data.rejectedNote } : {}),
     };
 
-    // The decision and the row reported for it are one unit. Written and read as
-    // two statements, a `cancelLeave` or `deleteLeave` landing in between would
-    // make a committed rejection answer CANCELLED, or throw on a row that no
-    // longer exists. The row lock the update takes is held until commit, so
-    // neither can slip in and the response is the row this write produced.
+    // Rejection is the one move that may start from PENDING *or* from a leave
+    // already REJECTED: re-rejecting is an idempotent no-op, as it always was.
+    // The row is read again inside the transaction so the decision is taken on
+    // the row this transaction will write, not on the guard's pre-transaction
+    // snapshot — otherwise an approval committing in between still finds the
+    // stale PENDING and is overwritten, and the status the guard read is not a
+    // safe value to lock on (it would turn the idempotent no-op into a 409).
     return prisma.$transaction(async (tx) => {
+      const current = await tx.leave.findUnique({
+        where: { id },
+        include: { staff: true, teacher: true },
+      });
+      if (!current) throw Errors.notFound('Leave request not found');
+
+      if (current.status === LeaveStatus.REJECTED) {
+        // Idempotent: a second rejection changes nothing and reports the row.
+        return current;
+      }
+      if (current.status !== LeaveStatus.PENDING) {
+        // Approved or cancelled while this request was in flight. That decision
+        // stands; this one must not overwrite it.
+        throw Errors.conflict(
+          'Cuti ini sudah diputuskan oleh permintaan lain. Muat ulang halaman untuk melihat status terbarunya.'
+        );
+      }
+
+      // Move PENDING → rejected, guarded on PENDING like the approval path. The
+      // row lock the update takes is held until commit, so a `cancelLeave` or
+      // `deleteLeave` cannot slip between the write and the read that reports
+      // it.
       const { count } = await tx.leave.updateMany({
-        where: { id, status: existing.status },
+        where: { id, status: LeaveStatus.PENDING },
         data: rejectData,
       });
       if (count !== 1) {

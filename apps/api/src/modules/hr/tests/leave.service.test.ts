@@ -470,7 +470,7 @@ describe('approveLeave', () => {
       rejectedNote: 'staf tidak cukup',
     });
 
-    // The rejection move is guarded on the status the guard read, like approval.
+    // The rejection move is guarded on PENDING, like approval.
     expect(db.leave.updateMany).toHaveBeenCalledWith({
       where: { id: 'leave-1', status: LeaveStatus.PENDING },
       data: expect.objectContaining({
@@ -506,17 +506,55 @@ describe('approveLeave', () => {
 
   it('refuses a rejection whose pending status was decided by a concurrent request', async () => {
     db.leave.findUnique.mockResolvedValue(leaveRow({ status: LeaveStatus.PENDING }));
-    // The guarded move matches nothing: a concurrent approval decided the row
-    // first, so its balance debit and attendance must not be overwritten.
+    // The in-transaction read sees PENDING, but the guarded move matches
+    // nothing: a concurrent decision committed between the read and the update.
     db.leave.updateMany.mockResolvedValue({ count: 0 });
 
     await expect(
       approveLeave('leave-1', 'approver-1', { status: LeaveStatus.REJECTED })
     ).rejects.toThrow(/sudah diputuskan/i);
 
-    // The read is skipped: a 409 carries no row, and reading one would race the
-    // decision that won.
+    // A 409 carries no row, so nothing is read back for one.
     expect(db.leave.findUniqueOrThrow).not.toHaveBeenCalled();
+    expect(db.leaveBalance.update).not.toHaveBeenCalled();
+    expect(db.staffAttendance.create).not.toHaveBeenCalled();
+  });
+
+  it('re-rejecting an already rejected leave is an idempotent no-op', async () => {
+    // The guard's snapshot still says PENDING, but a first rejection already
+    // committed. The decision is taken on the row read inside the transaction,
+    // so the second rejection succeeds and writes nothing — it must not turn
+    // into a 409 just because the guard's status no longer matches the row.
+    db.leave.findUnique
+      .mockResolvedValueOnce(leaveRow({ status: LeaveStatus.PENDING }))
+      .mockResolvedValueOnce(leaveRow({ status: LeaveStatus.REJECTED }));
+
+    const result = await approveLeave('leave-1', 'approver-1', {
+      status: LeaveStatus.REJECTED,
+      rejectedNote: 'staf tidak cukup',
+    });
+
+    expect(result.status).toBe(LeaveStatus.REJECTED);
+    expect(db.leave.updateMany).not.toHaveBeenCalled();
+    expect(db.leave.findUniqueOrThrow).not.toHaveBeenCalled();
+    expect(db.leaveBalance.update).not.toHaveBeenCalled();
+    expect(db.staffAttendance.create).not.toHaveBeenCalled();
+  });
+
+  it('refuses a rejection when the row read inside the transaction is already approved', async () => {
+    // The guard sees PENDING; an approval commits before this transaction's
+    // read. Reading the row inside the transaction — not trusting the snapshot —
+    // is what lets the rejection see APPROVED and refuse, instead of
+    // overwriting a balance the approval has already spent.
+    db.leave.findUnique
+      .mockResolvedValueOnce(leaveRow({ status: LeaveStatus.PENDING }))
+      .mockResolvedValueOnce(leaveRow({ status: LeaveStatus.APPROVED }));
+
+    await expect(
+      approveLeave('leave-1', 'approver-1', { status: LeaveStatus.REJECTED })
+    ).rejects.toThrow(/sudah diputuskan/i);
+
+    expect(db.leave.updateMany).not.toHaveBeenCalled();
     expect(db.leaveBalance.update).not.toHaveBeenCalled();
     expect(db.staffAttendance.create).not.toHaveBeenCalled();
   });
