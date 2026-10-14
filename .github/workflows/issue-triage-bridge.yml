@@ -10,13 +10,15 @@
 #              the triage owner studies the issue and the bot's comment. The
 #              labeler's burst of labels collapses to one dispatch per
 #              type+priority state (a marker comment).
-#   sweep   -> a not-`ready` issue has activity newer than its last triage, so an
+#   sweep   -> an open, not-`ready` issue has activity newer than the fleet's
+#              last write (its `sdlc:triase` comment or a bridge marker), so an
 #              edited description or a new comment is caught without a trigger on
 #              `issues.edited`. The description is never touched by this workflow.
 #
 # The triage owner is idempotent, so a duplicate dispatch is not a duplicate
-# comment; the markers only save runs. The rules live in
-# .github/scripts/issue-triage-bridge.sh so they can be run by hand.
+# comment; the markers only save runs. A marker is written only after the
+# dispatch is accepted, so a failure is retried by the next sweep. The rules live
+# in .github/scripts/issue-triage-bridge.sh so they can be run by hand.
 name: Issue triage bridge
 
 on:
@@ -42,7 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           sparse-checkout: .github/scripts
           persist-credentials: false
@@ -59,7 +61,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           sparse-checkout: .github/scripts
           persist-credentials: false

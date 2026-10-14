@@ -91,17 +91,21 @@ printf '%s' "$code"
 `;
 
 const BRIDGE_STUB = `#!/bin/sh
-log() { [ -n "\${GH_STUB_LOG:-}" ] && echo "$*" >> "$GH_STUB_LOG"; }
+log() { [ -n "\${GH_STUB_LOG:-}" ] && echo "$*" >> "\${GH_STUB_LOG}"; }
+post() { for a in "$@"; do last="$a"; done; log "POST_MARKER $(cat "$last" 2>/dev/null)"; }
 case "$*" in
-  *"/comments"*"-X POST"*)
-    for a in "$@"; do last="$a"; done
-    log "POST_MARKER $(cat "$last" 2>/dev/null)"
-    ;;
+  *"startswith(\\"<!-- triage-bridge-sweep:\\")"*)
+    [ -n "\${GH_STUB_SWEEP_MARKER:-}" ] && printf '%s' 999 ;;
+  *"/issues/comments/"*"-X PATCH"*) post "$@" ;;
+  *"/issues/comments/"*"-X DELETE"*) log "DELETE_MARKER" ;;
+  *"/comments"*"-X POST"*) post "$@" ;;
+  *"[.state, (.labels[].name)]"*)
+    printf '%s\\n' "\${GH_STUB_STATE_LABELS:-open bug priority:medium}" ;;
+  *"startswith(\\"priority:\\")"* | *"^(bug|enhancement"*)
+    printf '%s\\n' "\${GH_STUB_ISSUE_LABELS:-bug+priority:medium}" ;;
+  *"| max //"*) printf '%s\\n' "\${GH_STUB_LASTTRIAGE:-}" ;;
   *"search/issues"*) printf '%s\\n' "\${GH_STUB_SEARCH:-}" ;;
-  *"startswith(\\"priority:\\")"* | *"^(bug|enhancement"*) printf '%s\\n' "\${GH_STUB_ISSUE_LABELS:-}" ;;
   *".updated_at"*) printf '%s\\n' "\${GH_STUB_UPDATED:-}" ;;
-  *"test(\\"sdlc:triase\\") then"*) printf '%s\\n' "\${GH_STUB_BODYMARKED:-no}" ;;
-  *"select(.body | test(\\"sdlc:triase|triage-bridge\\"))"*) printf '%s\\n' "\${GH_STUB_LASTTRIAGE:-}" ;;
   *"/comments"*".[].body"*) printf '%s\\n' "\${GH_STUB_COMMENTS:-}" ;;
 esac
 exit 0
@@ -800,71 +804,111 @@ describe('issue-triage-bridge.sh', () => {
   });
 
   it('collapses the labeler’s burst to one dispatch per type+priority state', () => {
-    // The state marker was already recorded for this state, so a second label
-    // of the same burst does not dispatch again.
+    // The state marker was written seconds ago, so a second label of the same
+    // burst does not dispatch again.
     const marker = '<!-- triage-bridge:818:bug+priority:high -->';
     const { calls, out } = runBridge(
-      { GH_STUB_ISSUE_LABELS: 'bug+priority:high', GH_STUB_COMMENTS: marker },
+      {
+        GH_STUB_ISSUE_LABELS: 'bug+priority:high',
+        GH_STUB_COMMENTS: marker,
+        GH_STUB_LASTTRIAGE: new Date().toISOString(),
+      },
       ['--stdin'],
       labeledEvent('cipansor-bot', 'priority:high')
     );
     expect(calls).not.toContain('DISPATCH');
-    expect(out).toContain('already dispatched');
+    expect(out).toContain('burst collapsed');
   });
 
-  it('dispatches a never-triaged issue found by the sweep', () => {
+  it('re-dispatches when the issue returns to an old label state', () => {
+    // The same state marker exists, but it is older than the burst window, so a
+    // fresh move back to that state is a new response and dispatches again.
+    const marker = '<!-- triage-bridge:818:bug+priority:high -->';
     const { calls } = runBridge(
       {
-        GH_STUB_SEARCH: '818',
-        GH_STUB_UPDATED: '2026-10-14T02:14:15Z',
-        GH_STUB_BODYMARKED: 'no',
+        GH_STUB_ISSUE_LABELS: 'bug+priority:high',
+        GH_STUB_COMMENTS: marker,
+        GH_STUB_LASTTRIAGE: '2020-01-01T00:00:00Z',
+      },
+      ['--stdin'],
+      labeledEvent('cipansor-bot', 'priority:high')
+    );
+    expect(calls).toContain('DISPATCH');
+  });
+
+  it('records no marker when the label dispatch fails, so it retries', () => {
+    const { calls, status, out } = runBridge(
+      { GH_STUB_ISSUE_LABELS: 'bug+priority:high', CURL_STUB_CODE: '503' },
+      ['--stdin'],
+      labeledEvent('cipansor-bot', 'bug')
+    );
+    expect(calls).not.toContain('POST_MARKER');
+    expect(status).not.toBe(0);
+    expect(out).toContain('failed (HTTP 503)');
+  });
+
+  it('dispatches a legacy issue whose body holds the summary but has no marker comment', () => {
+    // #818: the triage summary lives in the body (`<!-- sdlc:triase -->`) and no
+    // fleet comment exists. It must still be swept, not skipped forever.
+    const { calls } = runBridge(
+      {
+        GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818',
         GH_STUB_LASTTRIAGE: '',
       },
       ['--sweep']
     );
     expect(calls).toContain('DISPATCH');
-    expect(calls).toContain('sweep-new');
+    expect(calls).toContain('sweep-activity');
+    expect(calls).toContain('POST_MARKER');
   });
 
-  it('dispatches when a description edit is newer than the last triage', () => {
+  it('dispatches when an edit is newer than the fleet’s last write', () => {
     const { calls } = runBridge(
       {
-        GH_STUB_SEARCH: '818',
-        GH_STUB_UPDATED: '2026-10-14T02:14:15Z',
-        GH_STUB_BODYMARKED: 'yes',
+        GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818',
         GH_STUB_LASTTRIAGE: '2026-10-13T19:46:23Z',
       },
       ['--sweep']
     );
     expect(calls).toContain('DISPATCH');
-    expect(calls).toContain('sweep-activity');
   });
 
-  it('does not re-dispatch when the sweep marker is already present', () => {
-    const marker = '<!-- triage-bridge-sweep:818:2026-10-14T02:14:15Z -->';
+  it('does not dispatch when nothing moved after the fleet’s last write', () => {
+    // A marker written by the bridge moves `updated_at` to its own instant, so
+    // the two are equal and the bridge does not trigger itself.
     const { calls } = runBridge(
       {
-        GH_STUB_SEARCH: '818',
-        GH_STUB_UPDATED: '2026-10-14T02:14:15Z',
-        GH_STUB_BODYMARKED: 'yes',
-        GH_STUB_LASTTRIAGE: '2026-10-13T19:46:23Z',
-        GH_STUB_COMMENTS: marker,
+        GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818',
+        GH_STUB_LASTTRIAGE: '2026-10-14T02:14:15Z',
       },
       ['--sweep']
     );
     expect(calls).not.toContain('DISPATCH');
   });
 
-  it('does not dispatch when there is no activity after the last triage', () => {
-    const { calls } = runBridge(
+  it('records no sweep marker and fails the run when the dispatch fails', () => {
+    const { calls, status } = runBridge(
       {
-        GH_STUB_SEARCH: '818',
-        GH_STUB_UPDATED: '2026-10-13T19:46:23Z',
-        GH_STUB_BODYMARKED: 'yes',
-        GH_STUB_LASTTRIAGE: '2026-10-13T19:46:23Z',
+        GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818',
+        GH_STUB_LASTTRIAGE: '',
+        CURL_STUB_CODE: '500',
       },
       ['--sweep']
     );
+    expect(calls).not.toContain('POST_MARKER');
+    expect(status).not.toBe(0);
+  });
+
+  it('drops a stale sweep marker on an issue that is now ready', () => {
+    const { calls } = runBridge(
+      {
+        GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818',
+        GH_STUB_STATE_LABELS: 'open ready',
+        GH_STUB_SWEEP_MARKER: 'yes',
+      },
+      ['--sweep']
+    );
+    expect(calls).toContain('DELETE_MARKER');
     expect(calls).not.toContain('DISPATCH');
   });
 });

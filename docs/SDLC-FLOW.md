@@ -123,8 +123,17 @@ pertentangan itu dilaporkan sebagai issue.
     (`issue-triage-bridge.yml` + `.github/scripts/issue-triage-bridge.sh`)
     mendispatch pemilik triase saat bot memasang label tipe/prioritas, dan saat
     issue belum `ready` punya aktivitas (komentar atau suntingan deskripsi)
-    yang lebih baru dari triase terakhir. Idempoten: satu putaran = satu
-    dispatch (penanda per keadaan tipe+prioritas, dan per stempel aktivitas).
+    yang lebih baru dari tulisan armada terakhir. Tulisan armada terakhir adalah
+    `updated_at` terbaru di antara komentar triase pemilik (`sdlc:triase`) dan
+    penanda jembatan — tanpa margin waktu, karena penanda yang ditulis jembatan
+    memindahkan `updated_at` ke instannya sendiri (jadi jembatan tidak memicu
+    dirinya) sedangkan suntingan pelapor beberapa detik kemudian sudah lebih
+    baru. Idempoten: satu putaran = satu dispatch (penanda per keadaan
+    tipe+prioritas dalam jendela burst 300 dtk, dan satu penanda sweep per
+    issue). Penanda hanya ditulis setelah dispatch diterima (HTTP 2xx), jadi
+    dispatch yang gagal diulang sweep berikutnya dan run-nya gagal keras. Issue
+    lama yang ringkasannya ada di body tanpa komentar penanda (ditriase sebelum
+    jembatan ini ada) tetap disapu sekali, bukan dilewati selamanya.
 20. **Deskripsi PR tidak ditanggapi otomatis.** Tidak ada pemicu
     `pull_request.edited`; gerbang tinjau yang sudah ada membaca deskripsi PR,
     issue tertaut, seluruh diff, dan semua komentar. Sebuah pemicu edit akan
