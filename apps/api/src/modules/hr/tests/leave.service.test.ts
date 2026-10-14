@@ -96,6 +96,7 @@ vi.mock('../../../lib/prisma', () => ({ prisma: prismaMock }));
 
 import {
   createLeave,
+  updateLeave,
   approveLeave,
   cancelLeave,
   deleteLeave,
@@ -725,6 +726,74 @@ describe('approveLeave', () => {
 
     expect(db.leaveBalance.update.mock.calls.length).toBe(balanceWrites);
     expect(db.staffAttendance.findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('updateLeave', () => {
+  it('moves the dates of a pending leave with a guarded write', async () => {
+    db.leave.findUnique.mockResolvedValue(leaveRow({ status: LeaveStatus.PENDING }));
+    db.leave.findUniqueOrThrow.mockResolvedValue(
+      leaveRow({
+        status: LeaveStatus.PENDING,
+        startDate: new Date('2026-01-10T00:00:00.000Z'),
+        endDate: new Date('2026-01-11T00:00:00.000Z'),
+        totalDays: 2,
+      })
+    );
+
+    const result = await updateLeave('leave-1', {
+      startDate: '2026-01-10T00:00:00.000Z',
+      endDate: '2026-01-11T00:00:00.000Z',
+    });
+
+    // The move is guarded on PENDING, so a decision committing between the read
+    // and the write cannot be overwritten by the edit.
+    expect(db.leave.updateMany).toHaveBeenCalledWith({
+      where: { id: 'leave-1', status: LeaveStatus.PENDING },
+      data: expect.objectContaining({
+        startDate: new Date('2026-01-10T00:00:00.000Z'),
+        endDate: new Date('2026-01-11T00:00:00.000Z'),
+        totalDays: 2,
+      }),
+    });
+    // The unconditional `update` is gone, and the row reported for the edit is
+    // read inside the same transaction the write locked.
+    expect(db.leave.update).not.toHaveBeenCalled();
+    expect(result.totalDays).toBe(2);
+  });
+
+  it('refuses to edit a leave that is no longer pending', async () => {
+    // An approval already debited the balance and marked attendance for the
+    // dates it read; moving those dates now would leave the two disagreeing.
+    db.leave.findUnique.mockResolvedValue(leaveRow({ status: LeaveStatus.APPROVED }));
+
+    await expect(
+      updateLeave('leave-1', {
+        startDate: '2026-01-10T00:00:00.000Z',
+        endDate: '2026-01-11T00:00:00.000Z',
+      })
+    ).rejects.toThrow(/sudah diputuskan/i);
+
+    expect(db.leave.updateMany).not.toHaveBeenCalled();
+    expect(db.leave.update).not.toHaveBeenCalled();
+  });
+
+  it('refuses an edit whose pending status was decided before the guarded write', async () => {
+    // The read saw PENDING, but an approval/cancellation committed before the
+    // guarded write. The write matches nothing and the edit is refused rather
+    // than moving the dates an approval has already marked attendance for.
+    db.leave.findUnique.mockResolvedValue(leaveRow({ status: LeaveStatus.PENDING }));
+    db.leave.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(
+      updateLeave('leave-1', {
+        startDate: '2026-01-10T00:00:00.000Z',
+        endDate: '2026-01-11T00:00:00.000Z',
+      })
+    ).rejects.toThrow(/sudah diputuskan/i);
+
+    expect(db.leave.update).not.toHaveBeenCalled();
+    expect(db.leave.findUniqueOrThrow).not.toHaveBeenCalled();
   });
 });
 
