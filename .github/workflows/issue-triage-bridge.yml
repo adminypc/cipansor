@@ -10,11 +10,12 @@
 #              the triage owner studies the issue and the bot's comment. The
 #              labeler's burst of labels collapses to one dispatch per
 #              type+priority state (a marker comment).
-#   sweep   -> an open, not-`ready` issue has activity newer than the fleet's
-#              last write (its `sdlc:triase` comment or a bridge marker), so an
-#              edited description or a new comment is caught without a trigger on
+#   sweep   -> an open, not-`ready` issue's activity signal (body + non-fleet
+#              comments) changed since the bridge's last checkpoint, so an edited
+#              description or a new comment is caught without a trigger on
 #              `issues.edited`. The description is never touched by this workflow.
 #
+# The signal is content, not a timestamp, so a same-second edit is still caught.
 # The triage owner is idempotent, so a duplicate dispatch is not a duplicate
 # comment; the markers only save runs. A marker is written only after the
 # dispatch is accepted, so a failure is retried by the next sweep. The rules live

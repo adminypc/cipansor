@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawnSync } from 'child_process';
+import { createHash } from 'crypto';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
@@ -93,20 +94,24 @@ printf '%s' "$code"
 const BRIDGE_STUB = `#!/bin/sh
 log() { [ -n "\${GH_STUB_LOG:-}" ] && echo "$*" >> "\${GH_STUB_LOG}"; }
 post() { for a in "$@"; do last="$a"; done; log "POST_MARKER $(cat "$last" 2>/dev/null)"; }
+log "GH $*"
 case "$*" in
+  *"search/issues"*) printf '%s\\n' "\${GH_STUB_SEARCH:-}" ;;
+  *"[.state, (.labels[].name)]"*)
+    printf '%s\\n' "\${GH_STUB_STATE_LABELS:-open bug priority:medium}" ;;
+  *"select(("*) printf '%s\\n' "\${GH_STUB_NONFLEET:-}" ;;
   *"startswith(\\"<!-- triage-bridge-sweep:\\")"*)
-    [ -n "\${GH_STUB_SWEEP_MARKER:-}" ] && printf '%s' 999 ;;
+    n=$(printf '%s' "$*" | sed -n 's#.*/issues/\\([0-9][0-9]*\\)/.*#\\1#p')
+    m=$(printenv "GH_STUB_MARKER_$n" 2>/dev/null || true)
+    [ -n "$m" ] || m="\${GH_STUB_SWEEP_MARKER:-}"
+    [ -n "$m" ] && printf '%s' "$m" ;;
+  *"| max //"*) printf '%s\\n' "\${GH_STUB_LASTTRIAGE:-}" ;;
+  *"join(\\"+\\")"*) printf '%s\\n' "\${GH_STUB_ISSUE_LABELS:-bug+priority:medium}" ;;
+  *".body // \\"\\""*) printf '%s\\n' "\${GH_STUB_BODY:-}" ;;
+  *"/comments"*".[].body"*) printf '%s\\n' "\${GH_STUB_COMMENTS:-}" ;;
   *"/issues/comments/"*"-X PATCH"*) post "$@" ;;
   *"/issues/comments/"*"-X DELETE"*) log "DELETE_MARKER" ;;
   *"/comments"*"-X POST"*) post "$@" ;;
-  *"[.state, (.labels[].name)]"*)
-    printf '%s\\n' "\${GH_STUB_STATE_LABELS:-open bug priority:medium}" ;;
-  *"startswith(\\"priority:\\")"* | *"^(bug|enhancement"*)
-    printf '%s\\n' "\${GH_STUB_ISSUE_LABELS:-bug+priority:medium}" ;;
-  *"| max //"*) printf '%s\\n' "\${GH_STUB_LASTTRIAGE:-}" ;;
-  *"search/issues"*) printf '%s\\n' "\${GH_STUB_SEARCH:-}" ;;
-  *".updated_at"*) printf '%s\\n' "\${GH_STUB_UPDATED:-}" ;;
-  *"/comments"*".[].body"*) printf '%s\\n' "\${GH_STUB_COMMENTS:-}" ;;
 esac
 exit 0
 `;
@@ -753,6 +758,14 @@ describe('issue-triage-bridge.sh', () => {
       issue: { number: 818, labels: [{ name: 'bug' }, { name: 'priority:high' }] },
     });
 
+  // The sweep checkpoint is a hash of the issue body plus the non-fleet comments
+  // (author + `updated_at` + body), so the test can compute the same signal the
+  // script does and store it in the marker.
+  const signal = (body: string, nonfleet = '') =>
+    createHash('sha256').update(`${body}\n${nonfleet}`).digest('hex').slice(0, 16);
+  const sweepMarker = (n: number, sig: string) =>
+    `<!-- triage-bridge-sweep:${n}:${sig} -->\n\n_This comment was created by an AI agent (OpenHands) on behalf of the repository maintainers._`;
+
   it('dispatches the triage owner when a bot applies a type label', () => {
     const { calls, out } = runBridge(
       { GH_STUB_ISSUE_LABELS: 'bug+priority:high' },
@@ -851,10 +864,7 @@ describe('issue-triage-bridge.sh', () => {
     // #818: the triage summary lives in the body (`<!-- sdlc:triase -->`) and no
     // fleet comment exists. It must still be swept, not skipped forever.
     const { calls } = runBridge(
-      {
-        GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818',
-        GH_STUB_LASTTRIAGE: '',
-      },
+      { GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818', GH_STUB_BODY: 'summary' },
       ['--sweep']
     );
     expect(calls).toContain('DISPATCH');
@@ -862,35 +872,83 @@ describe('issue-triage-bridge.sh', () => {
     expect(calls).toContain('POST_MARKER');
   });
 
-  it('dispatches when an edit is newer than the fleet’s last write', () => {
+  it('dispatches when the description changed since the checkpoint', () => {
     const { calls } = runBridge(
       {
         GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818',
-        GH_STUB_LASTTRIAGE: '2026-10-13T19:46:23Z',
+        GH_STUB_BODY: 'edited',
+        GH_STUB_SWEEP_MARKER: sweepMarker(818, signal('before')),
       },
       ['--sweep']
     );
     expect(calls).toContain('DISPATCH');
   });
 
-  it('does not dispatch when nothing moved after the fleet’s last write', () => {
-    // A marker written by the bridge moves `updated_at` to its own instant, so
-    // the two are equal and the bridge does not trigger itself.
+  it('does not dispatch when nothing changed since the checkpoint', () => {
+    // The marker stores the signal of the activity already answered, so an
+    // unchanged issue is not re-dispatched — this is what keeps the loop closed.
     const { calls } = runBridge(
       {
         GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818',
-        GH_STUB_LASTTRIAGE: '2026-10-14T02:14:15Z',
+        GH_STUB_BODY: 'same',
+        GH_STUB_SWEEP_MARKER: sweepMarker(818, signal('same')),
       },
       ['--sweep']
     );
     expect(calls).not.toContain('DISPATCH');
   });
 
+  it('does not dispatch on a fleet comment alone', () => {
+    // The bot's own comment is excluded from the signal, so a bot reply never
+    // re-triages the issue.
+    const { calls } = runBridge(
+      {
+        GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818',
+        GH_STUB_BODY: 'same',
+        GH_STUB_NONFLEET: '',
+        GH_STUB_SWEEP_MARKER: sweepMarker(818, signal('same', '')),
+      },
+      ['--sweep']
+    );
+    expect(calls).not.toContain('DISPATCH');
+  });
+
+  it('keeps sweeping after an issue that needs no dispatch (set -e must not abort)', () => {
+    // #819 is unchanged (process_one returns 1); #818 was edited. Both must be
+    // visited: a bare call under `set -e` would stop the sweep at #819.
+    const { calls } = runBridge(
+      {
+        GH_STUB_SEARCH: '2026-10-14T02:14:15Z 819\n2026-10-14T02:14:00Z 818',
+        GH_STUB_BODY: 'edited',
+        GH_STUB_MARKER_818: sweepMarker(818, signal('before')),
+        GH_STUB_MARKER_819: sweepMarker(819, signal('edited')),
+      },
+      ['--sweep']
+    );
+    expect(calls).toContain('/issues/818');
+    expect(calls).toContain('/issues/819');
+    expect(calls).toContain('DISPATCH');
+  });
+
+  it('reads at most SWEEP_PAGES pages of the search', () => {
+    // A full page 1 would normally make `--paginate` read every page; the sweep
+    // requests pages one at a time and stops at SWEEP_PAGES, so the search cost
+    // is bounded (finding: the page cap did not bound the API calls).
+    const items = Array.from({ length: 100 }, (_, i) => `2026-10-14T02:00:00Z ${900 - i}`).join(
+      '\n'
+    );
+    const { calls } = runBridge({ GH_STUB_SEARCH: items, SWEEP_PAGES: '2', SWEEP_MAX: '0' }, [
+      '--sweep',
+    ]);
+    const searchCalls = calls.split('\n').filter((l) => l.includes('search/issues')).length;
+    expect(searchCalls).toBe(2);
+  });
+
   it('records no sweep marker and fails the run when the dispatch fails', () => {
     const { calls, status } = runBridge(
       {
         GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818',
-        GH_STUB_LASTTRIAGE: '',
+        GH_STUB_BODY: 'edited',
         CURL_STUB_CODE: '500',
       },
       ['--sweep']

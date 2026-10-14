@@ -9,26 +9,27 @@
 #
 #   --stdin   a bot applies a type or priority label — the labeler responded, so
 #             the triage owner studies the issue and the bot's comment
-#   --sweep   an open, not-`ready` issue has activity newer than the fleet's last
-#             write — this catches an edited description or a new comment without
-#             a trigger on `issues.edited`
+#   --sweep   an open, not-`ready` issue has new activity by someone other than
+#             the fleet — this catches an edited description or a new comment
+#             without a trigger on `issues.edited`
 #
-# Both paths key on the timestamp of the fleet's last write about triage: the
-# triage owner's `<!-- sdlc:triase -->` comment, or any `triage-bridge` marker
-# comment. When the issue's `updated_at` is strictly newer than that, someone
-# else acted and the owner is dispatched. No time margin is used: a marker
-# written by this bridge moves `updated_at` to its own creation instant, so the
-# two are equal and the bridge does not trigger itself, while a reporter edit a
-# few seconds later is strictly newer and is caught (the old 60-second margin
-# swallowed edits made just after a triage — reported on #818's follow-up).
+# The sweep keys on an *activity signal*: a hash of the issue body plus every
+# non-fleet comment's author, body and `updated_at`. A description edit, a new
+# comment or an edited comment changes the hash, and it is compared with the
+# checkpoint stored in the sweep marker. Because the signal is content, not a
+# second-resolution timestamp, a reporter edit made in the same second as the
+# marker write is still a different signal and is caught (the old
+# `updated_at <= comment_time` comparison swallowed it). The fleet's own comments
+# (the bot and GitHub Actions) are excluded, so a bot reply never re-triages the
+# issue — that is what keeps the loop closed.
 #
-# An issue whose summary lives in the body with no marker comment (triaged
-# before this bridge existed) has no fleet timestamp, so it is dispatched once as
-# a migration and given a marker; the body marker is never a reason to skip it.
+# The checkpoint is written only after the dispatch is accepted (HTTP 2xx): a
+# failed dispatch leaves the old checkpoint, so the next sweep retries it and the
+# run fails loudly instead of looking like a quiet, completed sweep.
 #
-# A marker comment is recorded only after the dispatch is accepted (HTTP 2xx).
-# A failed dispatch leaves no marker, so the next sweep retries it and the run
-# fails loudly instead of looking like a quiet, completed sweep.
+# An issue whose summary lives in the body with no marker comment (triaged before
+# this bridge existed) has no checkpoint, so it is dispatched once as a migration
+# and given a marker; the body marker is never a reason to skip it.
 #
 # The triage owner is idempotent (one comment per round, updated in place), so a
 # duplicate dispatch is not a duplicate comment — the markers exist to save runs.
@@ -37,7 +38,7 @@
 #        issue-triage-bridge.sh --sweep
 # Env:   GH_TOKEN, REPO, OPENHANDS_API_KEY, SDLC_TRIAGE_ID (default `SDLC 01`),
 #        CURL (default curl), SWEEP_MAX (default 15, dispatches per sweep),
-#        SWEEP_PAGES (default 5, search pages of 100 read per sweep),
+#        SWEEP_PAGES (default 5, search pages read per sweep),
 #        BURST_WINDOW (default 300, seconds a label burst stays collapsed)
 set -eu
 
@@ -48,10 +49,14 @@ TRIAGE_ID="${SDLC_TRIAGE_ID:-d648595e-b0d9-4120-bbc4-07395cdbe6bf}"
 API="https://app.all-hands.dev/api/automation/v1"
 CURL="${CURL:-curl}"
 TYPE_LABELS="bug enhancement documentation refactor chore security"
-# SWEEP_MAX caps dispatches (cost), not pages: the sweep reads every page, sorts
-# by activity, then stops dispatching after SWEEP_MAX so the freshest issues go
-# first and the rest wait for the next run.
+# SWEEP_MAX caps dispatches (cost); SWEEP_PAGES caps the API calls. The sweep
+# reads up to SWEEP_PAGES pages, sorts by activity, then stops dispatching after
+# SWEEP_MAX so the freshest issues go first and the rest wait for the next run.
 SWEEP_MAX="${SWEEP_MAX:-15}"
+# Pages of 100 read per sweep, requested one at a time so the cap actually bounds
+# the API calls (`gh api --paginate` would read every page). An issue past this
+# window is not lost — the next sweep's `sort` by activity moves it in front once
+# it is touched.
 SWEEP_PAGES="${SWEEP_PAGES:-5}"
 # The labeler applies type, priority and status in one burst; a marker younger
 # than this collapses the burst to one dispatch. A later change to a type or
@@ -63,6 +68,15 @@ BURST_WINDOW="${BURST_WINDOW:-300}"
 FOOTER="_This comment was created by an AI agent (OpenHands) on behalf of the repository maintainers._"
 MARK_PREFIX="<!-- triage-bridge-sweep:"
 
+# True when <word> is one whitespace-separated word of <haystack>.
+contains_word() { # contains_word <word> <haystack>
+  case " $2 " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# A UTC timestamp as epoch seconds (0 on a parse failure).
 epoch() { date -u -d "$1" +%s 2>/dev/null || echo 0; }
 
 # Dispatch the triage owner for one issue. The body is built with jq so an issue
@@ -108,7 +122,7 @@ has_comment() { # has_comment <number> <marker>
     | grep -Fq -- "$m"
 }
 
-# The state marker's `updated_at`, or "" when it is absent.
+# The state marker's newest `updated_at`, or "" when it is absent.
 state_marker_age() { # state_marker_age <number> <marker>
   gh api --paginate "repos/$REPO/issues/$1/comments?per_page=100" \
     --jq "[.[] | select(.body | contains(\"$2\")) | .updated_at] | max // \"\"" \
@@ -128,16 +142,39 @@ $FOOTER" '{body: $body}' > "$tmp"
   rm -f "$tmp"
 }
 
-# The single sweep marker comment on the issue (created once, edited in place).
-write_sweep_marker() { # write_sweep_marker <number>
-  n="$1"; at="$2"
+# The sweep marker's checkpoint signal (`<!-- triage-bridge-sweep:<n>:<signal> -->`),
+# or "" when there is no marker.
+marker_signal() { # marker_signal <number>
+  gh api --paginate "repos/$REPO/issues/$1/comments?per_page=100" \
+    --jq "[.[] | select(.body | startswith(\"$MARK_PREFIX\"))] | last | .body // \"\"" \
+    2>/dev/null \
+    | sed -n "s/^$MARK_PREFIX[0-9]*:\([^ ]*\) -->.*/\1/p" | head -n1
+}
+
+# The issue's activity signal: a hash of the body plus every non-fleet comment's
+# author, body and `updated_at`. Independent of any single timestamp, so a
+# same-second edit is still a different signal; the fleet's own comments are
+# excluded so a bot reply never re-triages the issue. Actions comments post as
+# `github-actions[bot]`, so every `*[bot]` account is excluded along with the
+# automation account.
+activity_signal() { # activity_signal <number>
+  payload=$(gh api "repos/$REPO/issues/$1" --jq '.body // ""' 2>/dev/null || echo "")
+  payload="$payload
+$(gh api --paginate "repos/$REPO/issues/$1/comments?per_page=100" \
+    --jq '.[] | select(((.user.login | test("\\[bot\\]$")) or .user.login == "cipansor-bot") | not) | "\(.user.login) \(.updated_at) \(.body)"' \
+    2>/dev/null || echo "")"
+  printf '%s' "$payload" | sha256sum | cut -c1-16
+}
+
+# Create or update the single sweep marker, editing the existing one in place.
+write_sweep_marker() { # write_sweep_marker <number> <signal>
+  n="$1"; sig="$2"
   cid=$(gh api --paginate "repos/$REPO/issues/$n/comments?per_page=100" \
     --jq "[.[] | select(.body | startswith(\"$MARK_PREFIX\"))] | last | .id // \"\"" 2>/dev/null || echo "")
   tmp=$(mktemp)
-  # The stamp changes on every write so GitHub actually bumps the comment's
-  # `updated_at`: that new instant becomes the fleet's last write, so this very
-  # activity does not re-dispatch on the next sweep.
-  jq -n --arg body "$MARK_PREFIX$n:$at -->
+  # The signal is the checkpoint: it is the activity this run has answered, so
+  # the next sweep only re-dispatches when the signal changes again.
+  jq -n --arg body "$MARK_PREFIX$n:$sig -->
 
 $FOOTER" '{body: $body}' > "$tmp"
   if [ -n "$cid" ]; then
@@ -159,17 +196,6 @@ remove_sweep_marker() { # remove_sweep_marker <number>
     gh api "repos/$REPO/issues/comments/$cid" -X DELETE >/dev/null 2>&1 \
       || echo "::warning::could not remove the triage-bridge marker on #$1."
   fi
-}
-
-# The fleet's last write about triage: the newest `updated_at` among the owner's
-# `sdlc:triase` comments and this bridge's markers (both are edited in place, so
-# `updated_at` — not `created_at` — is the last-write instant). "" when the fleet
-# has never written a triage comment; a body-only summary predates this bridge and
-# does not count, so such an issue is dispatched once as a migration.
-last_fleet_comment() { # last_fleet_comment <number>
-  gh api --paginate "repos/$REPO/issues/$1/comments?per_page=100" \
-    --jq '[.[] | select(.body | test("sdlc:triase|triage-bridge")) | .updated_at] | max // ""' \
-    2>/dev/null || echo ""
 }
 
 # --stdin: a bot applied a type or priority label.
@@ -198,8 +224,7 @@ on_label() { # on_label <event-json>
   if has_comment "$number" "$marker"; then
     # The same type+priority state was already dispatched. Collapse only a burst:
     # once BURST_WINDOW has passed, a return to a state the issue held before is a
-    # fresh response and dispatches again (the reviewer's "old label state holds a
-    # new triage").
+    # fresh response and dispatches again.
     age=$(state_marker_age "$number" "$marker")
     if [ -n "$age" ]; then
       since=$(( $(date -u +%s) - $(epoch "$age") ))
@@ -221,8 +246,8 @@ on_label() { # on_label <event-json>
 
 # One candidate issue: decide whether it needs a dispatch. Returns 0 when a
 # dispatch was accepted, 2 when a dispatch was attempted and failed, 1 otherwise.
-process_one() { # process_one <number> <updated-at>
-  n="$1"; updated="$2"
+process_one() { # process_one <number>
+  n="$1"
 
   # A closed or `ready` issue is out of scope; drop any stale marker and stop.
   state=$(gh api "repos/$REPO/issues/$n" \
@@ -234,45 +259,58 @@ process_one() { # process_one <number> <updated-at>
       ;;
   esac
 
-  last=$(last_fleet_comment "$n")
-  if [ -n "$last" ]; then
-    ref=$(epoch "$last")
-    upd=$(epoch "$updated")
-    # Strictly newer: the fleet's own write equals `updated_at`, a reporter's
-    # later edit is newer. No margin, so an edit seconds after a triage counts.
-    if [ "$upd" -le "$ref" ]; then
-      return 1
-    fi
+  sig=$(activity_signal "$n")
+  [ -n "$sig" ] || return 1
+  # Nothing moved since the checkpoint: not a reason to triage.
+  if [ "$sig" = "$(marker_signal "$n")" ]; then
+    return 1
   fi
-  # Either the fleet has never written a triage comment, or the issue moved after
-  # its last one. Dispatch; only a 2xx earns the marker, so a failure retries.
-  if dispatch "$n" sweep-activity "$n"; then
-    write_sweep_marker "$n" "$n"
+
+  # The activity changed. Dispatch; only a 2xx earns the new checkpoint, so a
+  # failure keeps the old one and the next sweep retries.
+  if dispatch "$n" sweep-activity "$sig"; then
+    write_sweep_marker "$n" "$sig"
     return 0
   fi
-  echo "::warning::dispatch failed for #$n; the next sweep retries."
+  echo "::warning::dispatch failed for #$n; the checkpoint is unchanged, so the next sweep retries."
   return 2
 }
 
-# --sweep: an open, not-`ready` issue whose activity is newer than the fleet's
-# last write. Catches an edited description or a new comment with no event hook.
+# --sweep: an open, not-`ready` issue whose activity changed since the checkpoint.
+# Catches an edited description or a new comment with no event to hook.
 sweep() {
   count=0
   fails=0
-  # Read every page (the search returns one page otherwise), then order by the
-  # most recent activity so the freshest issues are dispatched first.
+  # Read up to SWEEP_PAGES pages, newest activity first. `gh api --paginate` would
+  # fetch every page regardless, so the pages are requested one at a time and the
+  # loop stops at SWEEP_PAGES or the first short page: SWEEP_PAGES caps the API
+  # calls, SWEEP_MAX caps the dispatches, and sorting by activity puts the
+  # freshest issues first. An issue past this window is not lost — the next
+  # sweep's `sort` moves it in front once it is touched.
   cand=$(mktemp)
-  gh api --paginate -X GET search/issues \
-    -f q="repo:$REPO is:issue is:open -label:ready" -f per_page=100 \
-    -f sort=updated -f order=desc \
-    --jq '.items[] | "\(.updated_at) \(.number)"' 2>/dev/null \
-    | sort -r | head -n "$((SWEEP_PAGES * 100))" > "$cand" || true
+  page=1
+  while [ "$page" -le "$SWEEP_PAGES" ]; do
+    items=$(gh api -X GET search/issues \
+      -f q="repo:$REPO is:issue is:open -label:ready" -f per_page=100 \
+      -f sort=updated -f order=desc -f page="$page" \
+      --jq '.items[] | "\(.updated_at) \(.number)"' 2>/dev/null || echo "")
+    [ -n "$items" ] || break
+    printf '%s\n' "$items" >> "$cand"
+    got=$(printf '%s\n' "$items" | grep -c . || true)
+    [ "$got" -ge 100 ] || break
+    page=$((page + 1))
+  done
+  sort -r -u -o "$cand" "$cand"
 
-  while read -r ts n; do
+  while read -r _ts n; do
     [ -n "${n:-}" ] || continue
     [ "$count" -lt "$SWEEP_MAX" ] || { echo "Reached SWEEP_MAX=$SWEEP_MAX; the rest wait for the next run."; break; }
-    process_one "$n" "$ts"
-    case $? in
+    # `process_one` returns 1 for "nothing to do" — a normal outcome. It is called
+    # in an `if` so `set -e` does not abort the sweep on that status (a bare call
+    # would stop at the first already-handled issue and fail the run).
+    rc=0
+    if process_one "$n"; then rc=0; else rc=$?; fi
+    case "$rc" in
       0) count=$((count + 1)) ;;
       2) fails=$((fails + 1)) ;;
     esac
