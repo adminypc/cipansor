@@ -236,13 +236,15 @@ on_label() { # on_label <event-json>
       fi
     fi
   fi
-  # Record the marker only after the dispatch is accepted, so a failed dispatch
-  # is retried instead of being masked as done. The sweep checkpoint is written
-  # from the same activity, so the label dispatch and the next sweep do not both
-  # answer it (a human edit after this still changes the signal and dispatches).
+  # Snapshot the activity *before* the dispatch, then record that snapshot as the
+  # checkpoint only after the dispatch is accepted. The dispatch answers the
+  # activity seen here; an edit landing between the snapshot and the marker write
+  # changes the signal, so the next sweep still catches it (taking the signal
+  # after the dispatch would fold that edit into the checkpoint and lose it).
+  sig=$(activity_signal "$number")
   if dispatch "$number" labeled "$marker"; then
     post_marker "$number" "$marker"
-    write_sweep_marker "$number" "$(activity_signal "$number")"
+    write_sweep_marker "$number" "$sig"
   else
     echo "::warning::#${number}'s label state stays unmarked; a later label or the sweep retries."
     exit 1

@@ -119,7 +119,14 @@ case "$*" in
     else
       printf '[]\\n'
     fi ;;
-  *"/issues/"*) printf '{"body":%s}\\n' "$(printf '%s' "\${GH_STUB_BODY:-}" | jq -c -Rs .)" ;;
+  *"/issues/"*)
+    # GH_STUB_BODY2, when set, is served once a dispatch has been logged — it
+    # simulates an edit landing between the signal snapshot and the marker write.
+    body="\${GH_STUB_BODY:-}"
+    if [ -n "\${GH_STUB_BODY2:-}" ] && grep -q DISPATCH "\${CURL_STUB_LOG:-/dev/null}" 2>/dev/null; then
+      body="\${GH_STUB_BODY2}"
+    fi
+    printf '{"body":%s}\\n' "$(printf '%s' "$body" | jq -c -Rs .)" ;;
 esac
 exit 0
 `;
@@ -889,6 +896,27 @@ describe('issue-triage-bridge.sh', () => {
     const sweepMarkers = calls.match(/triage-bridge-sweep:818:[0-9a-f]{16}/g) ?? [];
     expect(sweepMarkers.length).toBe(1);
     expect(calls).toContain(`triage-bridge-sweep:818:${signal('triaged')}`);
+  });
+
+  it('snapshots the signal before the label dispatch, so an edit during it is not lost', () => {
+    // Finding R243: taking the signal *after* the dispatch folds an edit landing
+    // in that window into the checkpoint, and no `issues.edited` event recovers
+    // it. The checkpoint must hold the pre-dispatch signal; the edit then
+    // differs from it and the next sweep dispatches.
+    const { calls } = runBridge(
+      {
+        GH_STUB_ISSUE_LABELS: 'bug+priority:high',
+        GH_STUB_BODY: 'before',
+        GH_STUB_BODY2: 'edited-during-dispatch',
+      },
+      ['--stdin'],
+      labeledEvent('cipansor-bot', 'bug')
+    );
+    expect(calls).toContain('DISPATCH');
+    // The checkpoint is the activity the label dispatch actually answered...
+    expect(calls).toContain(`triage-bridge-sweep:818:${signal('before')}`);
+    // ...not the post-dispatch edit, which would have hidden it.
+    expect(calls).not.toContain(`triage-bridge-sweep:818:${signal('edited-during-dispatch')}`);
   });
 
   it('dispatches a legacy issue whose body holds the summary but has no marker comment', () => {
