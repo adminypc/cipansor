@@ -91,6 +91,24 @@ pertentangan itu dilaporkan sebagai issue.
     Pengawas armada melaporkan pemakaian per automation setiap minggu, dan
     automation yang melampaui anggarannya berhenti sampai maintainer
     memutuskan.
+14. **Mengakui dulu, baru bekerja.** Sebelum menangani apa pun, automation
+    menambahkan reaction 👀 pada objek yang ditanganinya (issue, PR, atau
+    komentar), supaya orang melihat automation bekerja sebelum jawabannya tiba
+    (diminta pengguna 2026-10-13). Pemicu komentar ditangani workflow
+    `acknowledge.yml`; automation lain melakukannya dari promptnya.
+15. **Satu deskripsi, satu kesimpulan.** Kesimpulan akhir — triase, estimasi,
+    hasil QA, putusan tinjauan, pertanyaan terbuka — ditulis ke **body** issue
+    atau PR di bawah penanda tetap (mis. `<!-- sdlc:triase -->`) dan diperbarui
+    di tempat, bukan tersebar di komentar. Setiap body dibuka dengan basmalah.
+16. **`ready` adalah klaim kuat, dan eksklusif.** `ready` hanya diberikan bila
+    automation **sangat yakin**: tujuan jelas, kriteria penerimaan konkret, tanpa
+    pertanyaan terbuka. Selama masih ada yang perlu dibahas, diputuskan, atau
+    dikritisi, jangan `ready` dulu. `ready` tidak boleh bersama `question`,
+    `needs-info`, atau `pending-maintainer` (#814).
+17. **Hanya `cipansor-bot` yang melabeli.** Label yang dipasang akun lain
+    dicabut workflow `label-guard.yml`, kecuali label keputusan manusia
+    (`rilis-disetujui`, `rilis-ditolak`, `bot-implement`). Automasi membaca
+    label, jadi label manual membuat keduanya berbeda pendapat.
 
 ### Alur ujung ke ujung
 
@@ -539,8 +557,10 @@ _menulis_ artefak tidak pernah menjadi akun yang _menyetujuinya_.
   tidak ada issue ganda. Keduanya butuh rahasia repo `OPENHANDS_API_KEY`.
 - **Konsekuensi deterministik milik Actions.** Jembatan hasil CI, penutupan
   duplikat 7 hari, pemeriksaan ketidaksesuaian label, jembatan kegagalan
-  `main`, dan pengawas deploy adalah skrip, bukan agen: harus menyala tepat waktu dan tidak memakan
-  token.
+  `main`, pengawas deploy, pencabutan label yang dipasang akun lain
+  (`label-guard.yml`), basmalah pada setiap deskripsi (`basmalah.yml`), dan
+  pengakuan reaction 👀 (`acknowledge.yml`) adalah skrip, bukan agen: harus
+  menyala tepat waktu dan tidak memakan token.
 - **Satu masalah, satu peringatan.** Setiap kegagalan punya tepat satu
   pelapor, dan pelapor itu menyimpan penanda per run sehingga run yang sama
   tidak dilaporkan dua kali:
