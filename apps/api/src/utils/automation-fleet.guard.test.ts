@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawnSync } from 'child_process';
+import { createHash } from 'crypto';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
@@ -13,12 +14,18 @@ import { join, resolve } from 'path';
  *  - `reaction.sh` adds exactly one acknowledgement reaction, replacing any the
  *    same account left before;
  *  - `basmalah.sh` puts the basmalah at the top of a description and is
- *    idempotent.
+ *    idempotent;
+ *  - `issue-triage-bridge.sh` dispatches the triage owner when a bot applies a
+ *    type or priority label (collapsing the labeler's burst to one dispatch per
+ *    state) or when a not-`ready` issue has activity newer than its last triage,
+ *    so an edited description is re-triaged without a trigger on `issues.edited`.
  *
  * Plus the contracts the prompts and workflows share: the PR template carries
  * the basmalah into the body while an issue form only shows it (its `markdown`
- * block is preview only, so the `Basmalah` workflow supplies it for issues), and
- * the three scripts are wired into the workflows that run them.
+ * block is preview only, so the `Basmalah` workflow supplies it for issues), the
+ * triage owner comments first and edits the issue body only at `ready`, the
+ * priority rubric is evidence-backed, and the scripts are wired into the
+ * workflows that run them.
  */
 const REPO_ROOT = resolve(__dirname, '..', '..', '..', '..');
 const LABEL_GUARD = join(REPO_ROOT, '.github', 'scripts', 'label-guard.sh');
@@ -27,6 +34,7 @@ const BASMALAH = join(REPO_ROOT, '.github', 'scripts', 'basmalah.sh');
 const ACKNOWLEDGE = join(REPO_ROOT, '.github', 'scripts', 'acknowledge.sh');
 const DEPLOY = join(REPO_ROOT, 'scripts', 'deploy-sdlc-agents.py');
 const WORKFLOWS = join(REPO_ROOT, '.github', 'workflows');
+const BRIDGE = join(REPO_ROOT, '.github', 'scripts', 'issue-triage-bridge.sh');
 
 const AI_FOOTER = 'This comment was created by an AI agent';
 
@@ -63,17 +71,103 @@ esac
 exit 0
 `;
 
+const CURL_STUB = `#!/bin/sh
+log() { [ -n "\${CURL_STUB_LOG:-}" ] && echo "$*" >> "$CURL_STUB_LOG"; }
+code="\${CURL_STUB_CODE:-200}"
+out=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -w) shift 2 ;;
+    -X) shift 2 ;;
+    -d) log "BODY $2"; shift 2 ;;
+    -H) shift 2 ;;
+    -*) shift ;;
+    *) [ -z "$url" ] && url="$1"; shift ;;
+  esac
+done
+log "DISPATCH $url"
+[ -n "$out" ] && printf '{"status":"accepted"}' > "$out"
+printf '%s' "$code"
+`;
+
+const BRIDGE_STUB = `#!/bin/sh
+log() { [ -n "\${GH_STUB_LOG:-}" ] && echo "$*" >> "\${GH_STUB_LOG}"; }
+post() { for a in "$@"; do last="$a"; done; log "POST_MARKER $(cat "$last" 2>/dev/null)"; }
+log "GH $*"
+case "$*" in
+  *"search/issues"*) printf '%s\\n' "\${GH_STUB_SEARCH:-}" ;;
+  *"[.state, (.labels[].name)]"*)
+    [ "\${GH_STUB_READ_FAIL:-}" = state ] && exit 1
+    printf '%s\\n' "\${GH_STUB_STATE_LABELS:-open bug priority:medium}" ;;
+  *"select(("*) printf '%s\\n' "\${GH_STUB_NONFLEET:-}" ;;
+  *"startswith(\\"<!-- triage-bridge-sweep:"*)
+    n=$(printf '%s' "$*" | sed -n 's#.*/issues/\\([0-9][0-9]*\\)/.*#\\1#p')
+    want=$(printf '%s' "$*" | sed -n 's#.*triage-bridge-sweep:\\([0-9][0-9]*\\):.*#\\1#p')
+    m=$(printenv "GH_STUB_MARKER_$n" 2>/dev/null || true)
+    [ -n "$m" ] || m="\${GH_STUB_SWEEP_MARKER:-}"
+    if [ -z "$want" ]; then
+      # A prefix with no issue number (the regression) also matches a stray
+      # marker of another number sharing the comment set.
+      m="\${GH_STUB_MARKER_STRAY:-\$m}"
+    elif [ "$want" != "$n" ]; then
+      m=""
+    fi
+    [ -n "$m" ] && printf '%s' "$m" ;;
+  *"| max //"*) printf '%s\\n' "\${GH_STUB_LASTTRIAGE:-}" ;;
+  *"join(\\"+\\")"*) printf '%s\\n' "\${GH_STUB_ISSUE_LABELS:-bug+priority:medium}" ;;
+  *"/comments"*".[].body"*) printf '%s\\n' "\${GH_STUB_COMMENTS:-}" ;;
+  *"/issues/comments/"*"-X PATCH"*) post "$@" ;;
+  *"/issues/comments/"*"-X DELETE"*) log "DELETE_MARKER" ;;
+  *"/comments"*"-X POST"*) post "$@" ;;
+  *"/comments"*)
+    [ "\${GH_STUB_READ_FAIL:-}" = comments ] && exit 1
+    if [ -n "\${GH_STUB_NONFLEET:-}" ]; then
+      printf '[{"user":{"login":"%s"},"updated_at":"%s","body":%s}]\\n' \\
+        "\${GH_STUB_NONFLEET_LOGIN:-reporter}" "\${GH_STUB_NONFLEET_AT:-2026-01-01T00:00:00Z}" \\
+        "$(printf '%s' "$GH_STUB_NONFLEET" | jq -c -Rs .)"
+    else
+      printf '[]\\n'
+    fi ;;
+  *"/issues/"*)
+    [ "\${GH_STUB_READ_FAIL:-}" = issue ] && exit 1
+    # GH_STUB_BODY2, when set, is served once a dispatch has been logged — it
+    # simulates an edit landing between the signal snapshot and the marker write.
+    body="\${GH_STUB_BODY:-}"
+    if [ -n "\${GH_STUB_BODY2:-}" ] && grep -q DISPATCH "\${CURL_STUB_LOG:-/dev/null}" 2>/dev/null; then
+      body="\${GH_STUB_BODY2}"
+    fi
+    printf '{"body":%s}\\n' "$(printf '%s' "$body" | jq -c -Rs .)" ;;
+esac
+exit 0
+`;
+
 let dir: string;
+let bridgeDir: string;
 let log: string;
 
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), 'fleet-guards-'));
+  bridgeDir = mkdtempSync(join(tmpdir(), 'fleet-bridge-'));
   writeFileSync(join(dir, 'gh'), STUB, { mode: 0o755 });
+  // The bridge talks to more endpoints than the other guards, so it gets its own
+  // `gh` (as `gh`), alongside the `curl` stub it dispatches through.
+  writeFileSync(join(bridgeDir, 'gh'), BRIDGE_STUB, { mode: 0o755 });
+  writeFileSync(join(bridgeDir, 'curl'), CURL_STUB, { mode: 0o755 });
   log = join(dir, 'calls.log');
 });
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+afterAll(() => {
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(bridgeDir, { recursive: true, force: true });
+});
 
-function run(script: string, env: Record<string, string>, args: string[] = [], stdin?: string) {
+function run(
+  script: string,
+  env: Record<string, string>,
+  args: string[] = [],
+  stdin?: string,
+  binDir = dir
+) {
   writeFileSync(log, '');
   rmSync(`${log}.n`, { force: true });
   const r = spawnSync('sh', [script, ...args], {
@@ -81,10 +175,12 @@ function run(script: string, env: Record<string, string>, args: string[] = [], s
     input: stdin,
     env: {
       ...process.env,
-      PATH: `${dir}:${process.env.PATH}`,
+      PATH: `${binDir}:${dir}:${process.env.PATH}`,
       REPO: 'o/r',
       GH_TOKEN: 'x',
       GH_STUB_LOG: log,
+      CURL_STUB_LOG: log,
+      OPENHANDS_API_KEY: 'test-key',
       ...env,
     },
   });
@@ -94,6 +190,9 @@ function run(script: string, env: Record<string, string>, args: string[] = [], s
     calls: existsSync(log) ? readFileSync(log, 'utf8') : '',
   };
 }
+
+const runBridge = (env: Record<string, string>, args: string[], stdin?: string) =>
+  run(BRIDGE, env, args, stdin, bridgeDir);
 
 const LABELS =
   'bug\nenhancement\nready\nquestion\nneeds-info\npriority:high\npriority:medium\nrilis-disetujui\nrilis-ditolak\nbot-implement';
@@ -522,6 +621,62 @@ describe('fleet contracts', () => {
   it('keeps the AI-disclosure footer in the label-guard notice', () => {
     expect(read(LABEL_GUARD)).toContain(AI_FOOTER);
   });
+
+  it('wires the triage bridge into a workflow that fires on labels and a sweep', () => {
+    const wf = read(join(WORKFLOWS, 'issue-triage-bridge.yml'));
+    expect(wf).toContain('issue-triage-bridge.sh');
+    expect(wf).toMatch(/issues:[\s\S]*types:[\s\S]*labeled/);
+    expect(wf).toMatch(/schedule:/);
+    expect(wf).toContain('--sweep');
+  });
+
+  it('keeps the triage bridge issues-only and off the edited event', () => {
+    // The bridge answers issue activity, never a pull request; and it hooks
+    // `issues.labeled` and a sweep, not `issues.edited` (an edited event would
+    // also fire on basmalah.yml's and issue-label-sync.yml's own body PATCHes,
+    // as `github-actions[bot]`). A PR description edit needs no automation: the
+    // review gate already reads the description, the linked issue, the diff and
+    // every comment. Inspect the `on:` block — the file's own comment names the
+    // events it deliberately avoids.
+    const wf = read(join(WORKFLOWS, 'issue-triage-bridge.yml'));
+    const onBlock = wf.slice(wf.indexOf('\non:'), wf.indexOf('\njobs:'));
+    expect(onBlock).toContain('labeled');
+    expect(onBlock).not.toContain('pull_request');
+    expect(onBlock).not.toContain('edited');
+  });
+
+  it('states in docs/SDLC-FLOW.md that a PR description edit is not auto-answered', () => {
+    const flow = read(join(REPO_ROOT, 'docs', 'SDLC-FLOW.md'));
+    expect(flow).toMatch(/deskripsi PR/);
+    expect(flow).toMatch(/tidak ditanggapi otomatis|tidak ada pemicu/);
+  });
+
+  it('states the evidence-backed priority rubric in docs/LABELS.md', () => {
+    const labels = read(join(REPO_ROOT, 'docs', 'LABELS.md'));
+    expect(labels).toContain('priority:critical');
+    expect(labels).toContain('layanan mati total');
+    expect(labels).toContain('kehilangan/korupsi data');
+    expect(labels).toContain('UU PDP');
+    expect(labels).toContain('at most `medium`');
+    expect(labels).toContain('Never inflate `critical`');
+  });
+
+  it('states the comment-first rule for issues in docs/SDLC-FLOW.md', () => {
+    const flow = read(join(REPO_ROOT, 'docs', 'SDLC-FLOW.md'));
+    expect(flow).toContain('komentar');
+    expect(flow).toMatch(/komentar dulu|Komentar dulu/);
+    expect(flow).toContain('`ready`');
+  });
+
+  it('states in docs/SDLC-FLOW.md that `bot-implement`, not `ready`, triggers implementation', () => {
+    // A `ready` issue with a maintainer comment asking for a PR got no bot: the
+    // trigger is the `bot-implement` label (SDLC 06). The flow doc must say so,
+    // or a reader waits on `ready` that was never going to start anything.
+    const flow = read(join(REPO_ROOT, 'docs', 'SDLC-FLOW.md'));
+    const stage5 = flow.slice(flow.indexOf('| 5 | Implementasi'), flow.indexOf('| 6 | CI'));
+    expect(stage5).toContain('bot-implement');
+    expect(stage5).toMatch(/`ready` saja TIDAK memicu/);
+  });
 });
 
 describe('deploy-sdlc-agents.py', () => {
@@ -574,10 +729,379 @@ describe('deploy-sdlc-agents.py', () => {
   it.skipIf(!hasPy)('rebuilds from an original even when the live prompt lost its tail', () => {
     // The repair path: the truncated live prompt is not the base when the
     // original is supplied, so the tail comes back.
-    const truncated = `Header\n\n${FOOTER}\n\nBODY ISSUE/PR — SATU DESKRIPSI (WAJIB)\n- x`;
+    const truncated = `Header\n\n${FOOTER}\n\nBODY ISSUE/PR — KOMENTAR DULU, BODY SAAT SIAP (WAJIB)\n- x`;
     const original = `Header\n\n${FOOTER}\n\nPERILAKU SASARAN (level agentic)\nAturan khusus`;
     expect(newPrompt('SDLC 03', original)).toContain('Aturan khusus');
     // And the buggy base would not have recovered it (idempotent head only).
     expect(newPrompt('SDLC 03', truncated)).not.toContain('Aturan khusus');
+  });
+
+  it.skipIf(!hasPy)('inserts the comment-first body block exactly once', () => {
+    const original = `Header\n\n${FOOTER}\n\nPERILAKU SASARAN (level agentic)\nTail`;
+    const out = newPrompt('SDLC 03', original);
+    expect(out).toContain('KOMENTAR DULU, BODY SAAT SIAP');
+    expect(out.split('KOMENTAR DULU, BODY SAAT SIAP').length - 1).toBe(1);
+  });
+
+  it.skipIf(!hasPy)('replaces the old body block instead of stacking a second one', () => {
+    // A live prompt deployed before 2026-10-14 still carries the previous
+    // marker. The redeploy must replace it, not leave both blocks in place.
+    const old = `Header\n\n${FOOTER}\n\nBODY ISSUE/PR — SATU DESKRIPSI (WAJIB)\n- aturan lama\n\nPERILAKU SASARAN (level agentic)\nTail`;
+    const out = newPrompt('SDLC 03', old);
+    expect(out).not.toContain('SATU DESKRIPSI');
+    expect(out).not.toContain('aturan lama');
+    expect(out.split('KOMENTAR DULU, BODY SAAT SIAP').length - 1).toBe(1);
+  });
+
+  it.skipIf(!hasPy)(
+    'tells the issue triage owner to comment first and edit the body only at ready',
+    () => {
+      const original = `Header\n\n${FOOTER}\n\nPERILAKU SASARAN (level agentic)\nOLD`;
+      const out = newPrompt('SDLC 15', original);
+      // Comment first while not ready...
+      expect(out).toContain('KOMENTAR BARU');
+      // ...the body only once `ready` is applied.
+      expect(out).toContain('pasang `ready`');
+      expect(out).toMatch(/DESKRIPSI UTAMA issue/);
+      // And the priority rubric weighs impact, urgency and risk with evidence.
+      expect(out).toContain('Prioritas — beri bukti');
+      expect(out).toContain('layanan mati total');
+      expect(out).toContain('kehilangan/korupsi data');
+      expect(out).toContain('UU PDP');
+      expect(out).toContain('tanpa bukti, maksimum `medium`');
+      expect(out).toContain('pilih yang LEBIH RENDAH');
+      expect(out).toContain('Jangan menginflasi `critical`');
+    }
+  );
+});
+
+describe('issue-triage-bridge.sh', () => {
+  const labeledEvent = (sender: string, label: string) =>
+    JSON.stringify({
+      action: 'labeled',
+      sender: { login: sender },
+      label: { name: label },
+      issue: { number: 818, labels: [{ name: 'bug' }, { name: 'priority:high' }] },
+    });
+
+  // The sweep checkpoint is a hash of the issue body plus the non-fleet comments
+  // (author + `updated_at` + body), serialized as two compact JSON lines exactly
+  // as the script pipes them to `sha256sum` — including the trailing newline of
+  // each line, so a body that only gains a trailing newline hashes differently.
+  const signal = (body: string, nonfleet = '') => {
+    const line1 = JSON.stringify({ body });
+    const line2 = nonfleet
+      ? JSON.stringify([{ login: 'reporter', updated: '2026-01-01T00:00:00Z', body: nonfleet }])
+      : '[]';
+    return createHash('sha256').update(`${line1}\n${line2}\n`).digest('hex').slice(0, 16);
+  };
+  const sweepMarker = (n: number, sig: string) =>
+    `<!-- triage-bridge-sweep:${n}:${sig} -->\n\n_This comment was created by an AI agent (OpenHands) on behalf of the repository maintainers._`;
+
+  it('dispatches the triage owner when a bot applies a type label', () => {
+    const { calls, out } = runBridge(
+      { GH_STUB_ISSUE_LABELS: 'bug+priority:high' },
+      ['--stdin'],
+      labeledEvent('cipansor-bot', 'bug')
+    );
+    expect(calls).toContain('DISPATCH');
+    expect(calls).toContain('/dispatch');
+    expect(calls).toContain('POST_MARKER');
+    expect(out).toContain('Dispatched the triage owner for #818');
+  });
+
+  it('dispatches when a bot applies a priority label', () => {
+    const { calls } = runBridge(
+      { GH_STUB_ISSUE_LABELS: 'bug+priority:high' },
+      ['--stdin'],
+      labeledEvent('cipansor-bot', 'priority:high')
+    );
+    expect(calls).toContain('DISPATCH');
+  });
+
+  it('ignores a label a person applied', () => {
+    const { calls } = runBridge(
+      { GH_STUB_ISSUE_LABELS: 'bug+priority:high' },
+      ['--stdin'],
+      labeledEvent('adminypc', 'bug')
+    );
+    expect(calls).not.toContain('DISPATCH');
+  });
+
+  it('ignores a status label the labeler also sets', () => {
+    const { calls } = runBridge(
+      { GH_STUB_ISSUE_LABELS: 'bug+priority:high' },
+      ['--stdin'],
+      labeledEvent('cipansor-bot', 'ready')
+    );
+    expect(calls).not.toContain('DISPATCH');
+  });
+
+  it('marks its own marker comment with the AI-disclosure footer', () => {
+    // Without the footer, a comment-triggered automation (Penjernih issue on
+    // `needs-info`, or acknowledge.yml) would read the marker as a reply.
+    const { calls } = runBridge(
+      { GH_STUB_ISSUE_LABELS: 'bug+priority:high' },
+      ['--stdin'],
+      labeledEvent('cipansor-bot', 'bug')
+    );
+    expect(calls).toContain(AI_FOOTER);
+  });
+
+  it('collapses the labeler’s burst to one dispatch per type+priority state', () => {
+    // The state marker was written seconds ago, so a second label of the same
+    // burst does not dispatch again.
+    const marker = '<!-- triage-bridge:818:bug+priority:high -->';
+    const { calls, out } = runBridge(
+      {
+        GH_STUB_ISSUE_LABELS: 'bug+priority:high',
+        GH_STUB_COMMENTS: marker,
+        GH_STUB_LASTTRIAGE: new Date().toISOString(),
+      },
+      ['--stdin'],
+      labeledEvent('cipansor-bot', 'priority:high')
+    );
+    expect(calls).not.toContain('DISPATCH');
+    expect(out).toContain('burst collapsed');
+  });
+
+  it('re-dispatches when the issue returns to an old label state', () => {
+    // The same state marker exists, but it is older than the burst window, so a
+    // fresh move back to that state is a new response and dispatches again.
+    const marker = '<!-- triage-bridge:818:bug+priority:high -->';
+    const { calls } = runBridge(
+      {
+        GH_STUB_ISSUE_LABELS: 'bug+priority:high',
+        GH_STUB_COMMENTS: marker,
+        GH_STUB_LASTTRIAGE: '2020-01-01T00:00:00Z',
+      },
+      ['--stdin'],
+      labeledEvent('cipansor-bot', 'priority:high')
+    );
+    expect(calls).toContain('DISPATCH');
+  });
+
+  it('records no marker when the label dispatch fails, so it retries', () => {
+    const { calls, status, out } = runBridge(
+      { GH_STUB_ISSUE_LABELS: 'bug+priority:high', CURL_STUB_CODE: '503' },
+      ['--stdin'],
+      labeledEvent('cipansor-bot', 'bug')
+    );
+    expect(calls).not.toContain('POST_MARKER');
+    expect(status).not.toBe(0);
+    expect(out).toContain('failed (HTTP 503)');
+  });
+
+  it('records the sweep checkpoint after a label dispatch, so the sweep does not repeat it', () => {
+    // Finding R265: the label path wrote only the state marker, so the next
+    // sweep saw an empty checkpoint and dispatched the same activity again — two
+    // dispatches for one label. The label path must also record the sweep
+    // checkpoint of the activity it just answered.
+    const { calls } = runBridge(
+      { GH_STUB_ISSUE_LABELS: 'bug+priority:high', GH_STUB_BODY: 'triaged' },
+      ['--stdin'],
+      labeledEvent('cipansor-bot', 'bug')
+    );
+    expect(calls).toContain('DISPATCH');
+    expect(calls).toContain('POST_MARKER');
+    const sweepMarkers = calls.match(/triage-bridge-sweep:818:[0-9a-f]{16}/g) ?? [];
+    expect(sweepMarkers.length).toBe(1);
+    expect(calls).toContain(`triage-bridge-sweep:818:${signal('triaged')}`);
+  });
+
+  it('snapshots the signal before the label dispatch, so an edit during it is not lost', () => {
+    // Finding R243: taking the signal *after* the dispatch folds an edit landing
+    // in that window into the checkpoint, and no `issues.edited` event recovers
+    // it. The checkpoint must hold the pre-dispatch signal; the edit then
+    // differs from it and the next sweep dispatches.
+    const { calls } = runBridge(
+      {
+        GH_STUB_ISSUE_LABELS: 'bug+priority:high',
+        GH_STUB_BODY: 'before',
+        GH_STUB_BODY2: 'edited-during-dispatch',
+      },
+      ['--stdin'],
+      labeledEvent('cipansor-bot', 'bug')
+    );
+    expect(calls).toContain('DISPATCH');
+    // The checkpoint is the activity the label dispatch actually answered...
+    expect(calls).toContain(`triage-bridge-sweep:818:${signal('before')}`);
+    // ...not the post-dispatch edit, which would have hidden it.
+    expect(calls).not.toContain(`triage-bridge-sweep:818:${signal('edited-during-dispatch')}`);
+  });
+
+  it('skips an issue whose state read fails, instead of sweeping it', () => {
+    // Finding R261: a failed state read left `state` empty, no `closed`/`ready`
+    // pattern matched, and the issue was swept as if it were open.
+    const { calls, out } = runBridge(
+      { GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818', GH_STUB_READ_FAIL: 'state' },
+      ['--sweep']
+    );
+    expect(calls).not.toContain('DISPATCH');
+    expect(out).toContain('could not read #818');
+  });
+
+  it('skips an issue whose activity read fails, instead of dispatching an empty signal', () => {
+    // Finding R270: `activity_signal` swallowed the error, so an empty pipe still
+    // hashed to `e3b0c44298fc1c14` — a non-empty value that looked like a change
+    // and dispatched an unchanged issue on every sweep.
+    const { calls, out } = runBridge(
+      {
+        GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818',
+        GH_STUB_STATE_LABELS: 'open bug priority:medium',
+        GH_STUB_READ_FAIL: 'comments',
+      },
+      ['--sweep']
+    );
+    expect(calls).not.toContain('DISPATCH');
+    expect(calls).not.toContain('POST_MARKER');
+    expect(out).toContain('could not read the activity of #818');
+  });
+
+  it('dispatches a legacy issue whose body holds the summary but has no marker comment', () => {
+    // #818: the triage summary lives in the body (`<!-- sdlc:triase -->`) and no
+    // fleet comment exists. It must still be swept, not skipped forever.
+    const { calls } = runBridge(
+      { GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818', GH_STUB_BODY: 'summary' },
+      ['--sweep']
+    );
+    expect(calls).toContain('DISPATCH');
+    expect(calls).toContain('sweep-activity');
+    expect(calls).toContain('POST_MARKER');
+  });
+
+  it('dispatches when the description changed since the checkpoint', () => {
+    const { calls } = runBridge(
+      {
+        GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818',
+        GH_STUB_BODY: 'edited',
+        GH_STUB_SWEEP_MARKER: sweepMarker(818, signal('before')),
+      },
+      ['--sweep']
+    );
+    expect(calls).toContain('DISPATCH');
+  });
+
+  it('dispatches when only a trailing newline was added to the body', () => {
+    // Finding R161: reading the body through `$(…)` strips trailing newlines, so
+    // `A` and `A\n` hashed the same and the edit was missed. The body is read as
+    // JSON and hashed straight from the pipe, so the two differ.
+    expect(signal('A')).not.toBe(signal('A\n'));
+    const { calls } = runBridge(
+      {
+        GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818',
+        GH_STUB_BODY: 'A\n',
+        GH_STUB_SWEEP_MARKER: sweepMarker(818, signal('A')),
+      },
+      ['--sweep']
+    );
+    expect(calls).toContain('DISPATCH');
+  });
+
+  it('does not dispatch when nothing changed since the checkpoint', () => {
+    // The marker stores the signal of the activity already answered, so an
+    // unchanged issue is not re-dispatched — this is what keeps the loop closed.
+    const { calls } = runBridge(
+      {
+        GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818',
+        GH_STUB_BODY: 'same',
+        GH_STUB_SWEEP_MARKER: sweepMarker(818, signal('same')),
+      },
+      ['--sweep']
+    );
+    expect(calls).not.toContain('DISPATCH');
+  });
+
+  it('does not dispatch on a fleet comment alone', () => {
+    // The bot's own comment is excluded from the signal, so a bot reply never
+    // re-triages the issue.
+    const { calls } = runBridge(
+      {
+        GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818',
+        GH_STUB_BODY: 'same',
+        GH_STUB_NONFLEET: '',
+        GH_STUB_SWEEP_MARKER: sweepMarker(818, signal('same', '')),
+      },
+      ['--sweep']
+    );
+    expect(calls).not.toContain('DISPATCH');
+  });
+
+  it('matches a sweep marker only under its own issue number', () => {
+    // With correct number-scoping the query sees only the 818 marker, so the
+    // unchanged issue is not dispatched. The stub's numberless branch (the
+    // regression) serves GH_STUB_MARKER_STRAY instead — the same comment set
+    // with a foreign-number marker last, which a numberless prefix would read.
+    const { calls } = runBridge(
+      {
+        GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818',
+        GH_STUB_BODY: 'same',
+        GH_STUB_NONFLEET: '',
+        GH_STUB_SWEEP_MARKER: sweepMarker(818, signal('same', '')),
+        // The body a numberless prefix would select as `last`: the foreign
+        // marker, so `marker_signal` returns `deadbeefdeadbeef` and the
+        // unchanged issue is dispatched (the regression).
+        GH_STUB_MARKER_STRAY: '<!-- triage-bridge-sweep:999:deadbeefdeadbeef -->',
+      },
+      ['--sweep']
+    );
+    expect(calls).not.toContain('DISPATCH');
+  });
+
+  it('keeps sweeping after an issue that needs no dispatch (set -e must not abort)', () => {
+    // #819 is unchanged (process_one returns 1); #818 was edited. Both must be
+    // visited: a bare call under `set -e` would stop the sweep at #819.
+    const { calls } = runBridge(
+      {
+        GH_STUB_SEARCH: '2026-10-14T02:14:15Z 819\n2026-10-14T02:14:00Z 818',
+        GH_STUB_BODY: 'edited',
+        GH_STUB_MARKER_818: sweepMarker(818, signal('before')),
+        GH_STUB_MARKER_819: sweepMarker(819, signal('edited')),
+      },
+      ['--sweep']
+    );
+    expect(calls).toContain('/issues/818');
+    expect(calls).toContain('/issues/819');
+    expect(calls).toContain('DISPATCH');
+  });
+
+  it('reads at most SWEEP_PAGES pages of the search', () => {
+    // A full page 1 would normally make `--paginate` read every page; the sweep
+    // requests pages one at a time and stops at SWEEP_PAGES, so the search cost
+    // is bounded (finding: the page cap did not bound the API calls).
+    const items = Array.from({ length: 100 }, (_, i) => `2026-10-14T02:00:00Z ${900 - i}`).join(
+      '\n'
+    );
+    const { calls } = runBridge({ GH_STUB_SEARCH: items, SWEEP_PAGES: '2', SWEEP_MAX: '0' }, [
+      '--sweep',
+    ]);
+    const searchCalls = calls.split('\n').filter((l) => l.includes('search/issues')).length;
+    expect(searchCalls).toBe(2);
+  });
+
+  it('records no sweep marker and fails the run when the dispatch fails', () => {
+    const { calls, status } = runBridge(
+      {
+        GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818',
+        GH_STUB_BODY: 'edited',
+        CURL_STUB_CODE: '500',
+      },
+      ['--sweep']
+    );
+    expect(calls).not.toContain('POST_MARKER');
+    expect(status).not.toBe(0);
+  });
+
+  it('drops a stale sweep marker on an issue that is now ready', () => {
+    const { calls } = runBridge(
+      {
+        GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818',
+        GH_STUB_STATE_LABELS: 'open ready',
+        GH_STUB_SWEEP_MARKER: 'yes',
+      },
+      ['--sweep']
+    );
+    expect(calls).toContain('DELETE_MARKER');
+    expect(calls).not.toContain('DISPATCH');
   });
 });

@@ -142,9 +142,22 @@ setiap prompt dan dijaga workflow deterministik):
   (`POST …/issues/<n>/reactions`, `{"content":"eyes"}`; untuk komentar
   `…/issues/comments/<id>/reactions`), supaya orang tahu automation bekerja.
   Pemicu komentar dijaga `acknowledge.yml`.
-- **Satu deskripsi.** Kesimpulan final (triase, estimasi, QA, putusan tinjauan)
-  ditulis ke **body** issue/PR di bawah penanda tetap (`<!-- sdlc:… -->`),
-  diperbarui di tempat, bukan tersebar di komentar.
+- **Komentar dulu, body saat `ready` (issue).** Selama issue belum `ready`,
+  triase/estimasi/kriteria/pertanyaan ditulis sebagai **komentar**; **body** issue
+  diperbarui hanya saat bot memasang `ready` (ringkasan final di bawah penanda
+  `<!-- sdlc:triase -->`). PR berbeda: putusan tinjauan/QA tetap ke body PR di
+  bawah penanda (`<!-- sdlc:gerbang -->`).
+- **Prioritas berbukti.** Dampak, urgensi, dan risiko; apa pun di atas `medium`
+  wajib menyebut bukti konkret, tanpa bukti maksimum `medium`, bila ragu pilih
+  yang lebih rendah. `critical` hanya untuk layanan mati total, kehilangan data,
+  atau keamanan/privacy yang aktif bisa dieksploitasi. Jangan menginflasi.
+- **Triase ulang lewat jembatan, bukan `issues.edited`.** `issue-triage-bridge.yml`
+  + `.github/scripts/issue-triage-bridge.sh` mendispatch pemilik triase saat bot
+  memasang label tipe/prioritas dan saat issue belum `ready` punya aktivitas baru
+  (komentar atau suntingan deskripsi). Idempoten (penanda per keadaan dan per
+  stempel aktivitas). **Deskripsi PR tidak ditanggapi otomatis** — tidak ada
+  pemicu `pull_request.edited`; gerbang tinjau sudah membaca deskripsi, issue,
+  diff, dan semua komentar.
 - **Basmalah.** Setiap body dibuka dengan «بِسْمِ اللَّهِ الرَّحْمَنِ الرَّحِيمِ»;
   templat PR membawanya, form issue menampilkannya sebagai petunjuk (blok
   `markdown` form tidak ikut ke body), dan `basmalah.yml` menambahkannya bila lupa.

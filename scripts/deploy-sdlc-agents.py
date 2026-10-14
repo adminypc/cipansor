@@ -8,12 +8,15 @@ applies the 2026-10-13 changes to every automation:
 
   1. acknowledgement — react 👀 on the object it is about to handle, so a person
      sees the automation is working (the reporter asked for this);
-  2. one description — the basmalah opens every issue/PR body, and the final
-     summary (triage, estimate, QA result, review verdict) is written into the
-     main description, not scattered across comments;
-  3. harsher triage/review — criticize hard, ask probing questions, and never
-     apply `ready` while anything is still open (a `ready` label beside a
-     `question` label is the defect this prevents);
+  2. comment first, description when ready — the basmalah opens every issue/PR
+     body; while an issue is not yet `ready` the triage, estimate and open
+     questions are written as a comment, and only when `ready` is applied is the
+     issue description updated with the final summary (a pull request's verdict
+     still lands in the PR body);
+  3. harsher triage/review — criticize hard, ask probing questions, weigh
+     priority on impact, urgency and risk with evidence, and never apply `ready`
+     while anything is still open (a `ready` label beside a `question` label is
+     the defect this prevents);
   4. labels — only `cipansor-bot` labels; the deterministic enforcement is the
      `Label guard` workflow, the prompt states the rule.
 
@@ -43,14 +46,20 @@ KEY = os.environ.get("OPENHANDS_API_KEY", "")
 DEPLOY = os.environ.get("DEPLOY", "").lower() in ("1", "true", "yes")
 ONLY = os.environ.get("ONLY", "")
 
-BODY_MARK = "BODY ISSUE/PR — SATU DESKRIPSI (WAJIB)"
+BODY_MARK = "BODY ISSUE/PR — KOMENTAR DULU, BODY SAAT SIAP (WAJIB)"
+# A live prompt may still carry the previous body block. It is stripped before
+# the current one is inserted, so a redeploy replaces the block instead of
+# stacking the new one above the old (the marker's text changed on 2026-10-14).
+OLD_BODY_MARKS = ("BODY ISSUE/PR — SATU DESKRIPSI (WAJIB)",)
 TAIL_MARK = "PERILAKU SASARAN (level agentic)"
 
-BODY_BLOCK = """BODY ISSUE/PR — SATU DESKRIPSI (WAJIB)
+BODY_BLOCK = """BODY ISSUE/PR — KOMENTAR DULU, BODY SAAT SIAP (WAJIB)
 - Setiap body issue atau PR yang Anda tulis WAJIB dibuka dengan baris persis ini, lalu satu baris kosong, baru isinya:
   بِسْمِ اللَّهِ الرَّحْمَنِ الرَّحِيمِ
   (Bismillaahirrohmaanirrohiim bila tidak bisa menulis Arab.)
-- Ringkasan final tinggal di DESKRIPSI UTAMA, bukan tersebar di komentar. Semua yang perlu diputuskan orang (hasil triase, estimasi, hasil QA, putusan tinjauan, kriteria, pertanyaan terbuka) ditulis ke body issue/PR lewat `PATCH /repos/<owner>/<repo>/issues/<n>` (body adalah field `body`). Komentar hanya untuk percakapan yang berjalan; sebelum berhenti, salin kesimpulannya ke body dengan penanda idempoten (mis. `<!-- sdlc:triase -->`) dan perbarui bagian berpenanda itu, jangan menumpuk.
+- ISSUE — komentar dulu, body saat `ready`. Selama issue belum `ready`, triase, estimasi, kriteria, dan pertanyaan terbuka ditulis sebagai KOMENTAR BARU (dengan footer AI-disclosure), bukan ke body. Body issue hanya diperbarui saat Anda memasang `ready`: saat itu tulis ringkasan final ke body lewat `PATCH /repos/<owner>/<repo>/issues/<n>` (body adalah field `body`) di bawah penanda tetap (mis. `<!-- sdlc:triase -->`), diperbarui di tempat. Sebelum memasang `ready`, cabut dulu `question`/`needs-info`/`pending-maintainer` yang bertentangan. Bila belum `ready`, jangan mengubah body issue.
+- PR — kesimpulan final (putusan tinjauan, hasil QA) tetap ditulis ke DESKRIPSI UTAMA PR di bawah penanda tetap (mis. `<!-- sdlc:gerbang -->`), diperbarui di tempat.
+- Idempoten (invarian 4): satu pemicu = satu tulisan; perbarui komentar berpenanda Anda, jangan menumpuk. Jangan menanggapi komentar atau reaction milik Anda sendiri.
 - Sebelum menangani apa pun, tambahkan reaction 👀 pada objek yang Anda tangani (issue/PR/komentar) agar orang tahu automation bekerja: `POST /repos/<owner>/<repo>/issues/<n>/reactions` dengan body `{"content":"eyes"}`; untuk komentar: `POST /repos/<owner>/<repo>/issues/comments/<id>/reactions`. Jangan menumpuk reaction.
 - Hanya `cipansor-bot` (GITHUB_BOT_TOKEN) yang boleh memasang label. Jangan pasang label apa pun lewat `GITHUB_TOKEN`. `bot-implement`, `rilis-disetujui`, `rilis-ditolak` adalah keputusan maintainer — jangan pernah memasangnya.
 """
@@ -59,34 +68,41 @@ BODY_BLOCK = """BODY ISSUE/PR — SATU DESKRIPSI (WAJIB)
 # and only gains the BODY_BLOCK. Keys are matched as a substring of the name.
 TAILS = {
     "SDLC 01": """PERILAKU SASARAN (level agentic)
-Triase bug ini dengan KRITIS dan habis-habisan. Baca issue, cari duplikat di antara issue terbuka dan tertutup, dan tanyakan bertubi-tubi sampai sangat yakin: apa kegagalan dan penyebabnya, area/modul mana (path nyata), kriteria penerimaan yang bisa diamati, apakah premisnya benar. Tulis hasilnya ke DESKRIPSI UTAMA issue (edit body, bagian `<!-- sdlc:triase -->`), bukan komentar terpisah: tingkat keparahan beserta alasan, area yang bertanggung jawab, langkah berikutnya, dan pertanyaan yang tersisa. Terapkan hanya label yang sudah ada. JANGAN pasang `ready` (itu milik `Pelabel issue`). Tautkan setiap duplikat yang Anda temukan.
+Triase bug ini dengan KRITIS dan habis-habisan. Baca issue, cari duplikat di antara issue terbuka dan tertutup, dan tanyakan bertubi-tubi sampai sangat yakin: apa kegagalan dan penyebabnya, area/modul mana (path nyata), kriteria penerimaan yang bisa diamati, apakah premisnya benar. Tulis hasilnya sebagai KOMENTAR BARU (footer AI-disclosure), bukan ke body: tingkat keparahan beserta alasan, area yang bertanggung jawab, langkah berikutnya, dan pertanyaan yang tersisa. Body issue hanya diperbarui saat Anda memasang `ready` (lihat blok BODY di atas). Terapkan hanya label yang sudah ada. JANGAN pasang `ready` (itu milik `Pelabel issue`). Tautkan setiap duplikat yang Anda temukan.
 """,
     "SDLC 02": """PERILAKU SASARAN (level agentic)
-Estimasi usaha untuk issue ini, dikalibrasi terhadap pekerjaan serupa yang sudah di-merge di repo ini (sebut nomor PR-nya). Baca issue dan PR/issue pembanding, lalu tulis estimasi ke DESKRIPSI UTAMA issue (bagian `<!-- sdlc:estimasi -->`): ukuran (XS/S/M/L/XL), file/area yang kemungkinan tersentuh, risiko utama, dan kalibrasi. Bila issue terlalu kabur untuk diestimasi, katakan itu dan daftar pertanyaan yang akan membukanya — jangan menebak angka.
+Estimasi usaha untuk issue ini, dikalibrasi terhadap pekerjaan serupa yang sudah di-merge di repo ini (sebut nomor PR-nya). Baca issue dan PR/issue pembanding, lalu tulis estimasi (ukuran XS/S/M/L/XL, file/area yang kemungkinan tersentuh, risiko utama, kalibrasi) sebagai KOMENTAR BARU (footer AI-disclosure) selama issue belum `ready` — jangan menyentuh body issue. Hanya bila issue sudah `ready` tulis atau perbarui estimasi di DESKRIPSI UTAMA issue (bagian `<!-- sdlc:estimasi -->`), perbarui di tempat. Bila issue terlalu kabur untuk diestimasi, katakan itu dan daftar pertanyaan yang akan membukanya — jangan menebak angka.
 """,
     "SDLC 15": """PERILAKU SASARAN (level agentic)
 Triase issue ini dengan KRITIS dan habis-habisan. Sebelum memberi label apa pun, tanyakan bertubi-tubi sampai sangat yakin: apa masalah atau tujuannya persis; apakah kriteria penerimaannya konkret dan bisa diamati; apakah ada ketergantungan, non-goal, atau asumsi tersembunyi; apakah premisnya benar atau justru ada opsi "tidak perlu sama sekali". Bila satu saja belum terjawab, JANGAN pasang `ready`.
 
+Prioritas — beri bukti, jangan mengira-ngira. Nilai dampak, urgensi, dan risiko:
+- `priority:critical` HANYA bila salah satu terpenuhi: layanan mati total; kehilangan/korupsi data; kerentanan keamanan atau kebocoran data pribadi (UU PDP) yang aktif bisa dieksploitasi; pipeline rilis macet total. Sebut korban konkret (unit/peran) dan buktinya.
+- `priority:high` bila menghambat pekerjaan unit/peran sekarang, ada tenggat regulasi/akreditasi dalam siklus ini, berdampak banyak pengguna tanpa workaround, atau kelemahan keamanan yang belum bisa dieksploitasi. Sebut penghambat atau tenggatnya.
+- `priority:medium` (default) bila nyata tetapi tidak menghambat dan ada workaround. `priority:low` bila kosmetik.
+- Tepat satu prioritas. Apa pun di atas `medium` WAJIB menyertakan bukti konkret (path rute/berkas, jumlah pengguna/unit terdampak, tenggat, atau ID run); tanpa bukti, maksimum `medium`. Bila ragu antara dua tingkat, pilih yang LEBIH RENDAH dan catat alasannya. Jangan menginflasi `critical`. Nyatakan apakah issue menghambat pekerjaan lain. Nilai ulang prioritas di setiap putaran triase.
+
 Label:
 - Tepat satu tipe (bug/enhancement/documentation/refactor/chore/security) — tipe yang benar-benar dialami, bukan yang diminta.
-- Tepat satu prioritas (priority:critical/high/medium/low) dari dampak, urgensi, dan apakah menghambat pekerjaan lain; `priority:critical` hanya untuk gangguan total, kehilangan data, atau masalah keamanan.
 - `ready` HANYA bila SANGAT-SANGAT yakin: tujuan jelas, kriteria penerimaan konkret, tanpa pertanyaan terbuka. `ready` tidak boleh bersama `question`, `needs-info`, atau `pending-maintainer` — bila masih ada yang perlu dibahas, diputuskan, atau dikritisi, jangan `ready` dulu. Issue yang membawa `ready` dan `question` sekaligus adalah cacat yang harus dicegah.
 - `question` bila ini pertanyaan, bukan perubahan. `duplicate` + tautkan aslinya bila duplikat. Cacat tipis yang penyebabnya belum diketahui tetap `bug` + satu prioritas, bukan `needs-info` (Reproduksi bug menyelidikinya).
 - Jangan mengarang label; baca label repo dulu. Jangan pasang `bot-implement`.
 
-Tulis hasilnya ke DESKRIPSI UTAMA issue (edit body, bagian `<!-- sdlc:triase -->`), bukan komentar terpisah, dan perbarui bagian itu bila sudah ada:
+Tulis hasilnya sebagai KOMENTAR BARU (footer AI-disclosure), bukan ke body, dengan bagian:
 ## Triase
 - Tipe / Prioritas / Kesiapan (beserta alasan masing-masing)
+- Bukti prioritas (siapa/berapa terdampak, dampak, tenggat, workaround)
 - Area/modul (path nyata)
 - Kriteria penerimaan
 - Pertanyaan terbuka (kosong bila `ready`)
 - Duplikat (bila ada)
+Bila issue sudah siap: cabut `question`/`needs-info`/`pending-maintainer` yang bertentangan, pasang `ready`, lalu tulis ringkasan final itu ke DESKRIPSI UTAMA issue (bagian `<!-- sdlc:triase -->`, perbarui di tempat).
 """,
     "SDLC 16": """PERILAKU SASARAN (level agentic)
-Issue `needs-info` ini baru menerima komentar. Baca seluruh issue dan komentar baru, lalu putuskan dengan KRITIS apakah pelapor sudah memasok yang diminta. Bila kini jelas dan bisa diimplementasikan, hapus `needs-info`, tambah `ready` (hanya bila benar-benar yakin, tanpa pertanyaan terbuka), dan tulis penilaian ulang ke DESKRIPSI UTAMA issue (bagian `<!-- sdlc:triase -->`). Bila masih kabur, biarkan `needs-info` dan tulis detail spesifik yang masih kurang — jangan mengulang pertanyaan yang sudah ditanyakan. Bila duplikat, `duplicate` + tautkan aslinya. Bila tidak valid, `invalid` + alasannya. Jangan menghapus `ready` yang bukan Anda pasang tanpa menjelaskan alasannya.
+Issue `needs-info` ini baru menerima komentar. Baca seluruh issue dan komentar baru, lalu putuskan dengan KRITIS apakah pelapor sudah memasok yang diminta. Bila masih kabur, biarkan `needs-info` dan tulis detail spesifik yang masih kurang sebagai KOMENTAR BARU — jangan mengulang pertanyaan yang sudah ditanyakan. Bila kini jelas dan bisa diimplementasikan, hapus `needs-info`, tambah `ready` (hanya bila benar-benar yakin, tanpa pertanyaan terbuka), lalu tulis penilaian ulang ke DESKRIPSI UTAMA issue (bagian `<!-- sdlc:triase -->`). Bila duplikat, `duplicate` + tautkan aslinya. Bila tidak valid, `invalid` + alasannya. Jangan menghapus `ready` yang bukan Anda pasang tanpa menjelaskan alasannya.
 """,
     "SDLC 22": """PERILAKU SASARAN (level agentic)
-Menjawab maintainer pada issue `pending-maintainer` atau `needs-info`. Baca percakapan, suplai detail yang kurang, dan tanyakan bertubi-tubi sampai sangat yakin. Lampu hijau memberi `ready` (hanya bila tidak ada pertanyaan terbuka); penolakan memberi `wontfix` dan menutup. Tulis kesimpulannya ke DESKRIPSI UTAMA issue (bagian `<!-- sdlc:diskusi -->`), bukan hanya komentar. Ia tidak pernah bertindak atas komentarnya sendiri.
+Menjawab maintainer pada issue `pending-maintainer` atau `needs-info`. Baca percakapan, suplai detail yang kurang, dan tanyakan bertubi-tubi sampai sangat yakin. Selama masih ada yang perlu dibahas, tulis tanggapan sebagai KOMENTAR BARU. Lampu hijau memberi `ready` (hanya bila tidak ada pertanyaan terbuka), lalu tulis kesimpulan final ke DESKRIPSI UTAMA issue (bagian `<!-- sdlc:diskusi -->`, perbarui di tempat); penolakan memberi `wontfix` dan menutup. Ia tidak pernah bertindak atas komentarnya sendiri.
 """,
     "SDLC 08": """PERILAKU SASARAN (level agentic)
 Tinjau PR ini dengan KRITIS dan habis-habisan. Baca deskripsi, seluruh diff terhadap `main`, setiap thread, dan issue tertaut. Tanyakan bertubi-tubi: apa yang bisa salah, apa yang belum diuji, apa yang bertentangan dengan keputusan di `.claude/memory/decisions/`, apa yang akan pecah di produksi. Untuk masalah lokal/mekanis, kirim komentar inline berisi blok `suggestion` agar bisa diterapkan satu klik; untuk masalah struktural, usulkan perubahan konkret dalam kata-kata. Jangan approve, jangan merge. Jangan mengarang masalah agar terlihat berguna: bila diff-nya bersih, katakan itu. Tulis ringkasan putusan (temuan, tingkat keparahan, apa yang menghalangi merge) ke DESKRIPSI UTAMA PR (bagian `<!-- sdlc:tinjauan -->`), bukan hanya komentar.
@@ -130,6 +146,14 @@ def new_prompt(name, prompt):
     tail_start = prompt.find(TAIL_MARK)
     orig_tail = prompt[tail_start:] if tail_start >= 0 else ""
     head = prompt[:tail_start] if tail_start >= 0 else prompt
+    # Replace an older body block so the insert below does not stack the new one
+    # above it. The current marker is left untouched, so a second pass is a
+    # no-op (idempotent) rather than re-inserting and shifting the separators.
+    for mark in OLD_BODY_MARKS:
+        i = head.find(mark)
+        if i >= 0:
+            head = head[:i].rstrip() + "\n"
+            break
     # Insert the BODY block once, right after the footer paragraph.
     if BODY_MARK not in head:
         anchor = "_This comment was created by an AI agent (OpenHands) on behalf of the maintainer._"

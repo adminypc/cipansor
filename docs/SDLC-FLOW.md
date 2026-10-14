@@ -96,10 +96,14 @@ pertentangan itu dilaporkan sebagai issue.
     komentar), supaya orang melihat automation bekerja sebelum jawabannya tiba
     (diminta pengguna 2026-10-13). Pemicu komentar ditangani workflow
     `acknowledge.yml`; automation lain melakukannya dari promptnya.
-15. **Satu deskripsi, satu kesimpulan.** Kesimpulan akhir — triase, estimasi,
-    hasil QA, putusan tinjauan, pertanyaan terbuka — ditulis ke **body** issue
-    atau PR di bawah penanda tetap (mis. `<!-- sdlc:triase -->`) dan diperbarui
-    di tempat, bukan tersebar di komentar. Setiap body dibuka dengan basmalah.
+15. **Issue: komentar dulu, body saat `ready`.** Selama issue belum `ready`,
+    triase, estimasi, kriteria, dan pertanyaan terbuka ditulis sebagai
+    **komentar** — percakapan kerja. **Body** issue hanya diperbarui saat bot
+    memasang `ready`: ringkasan final ditulis ke body di bawah penanda tetap
+    (mis. `<!-- sdlc:triase -->`), diperbarui di tempat. PR berbeda — putusan
+    tinjauan dan hasil QA ditulis ke **body** PR di bawah penanda (mis.
+    `<!-- sdlc:gerbang -->`), karena PR sudah artefak yang selesai. Setiap body
+    dibuka dengan basmalah.
 16. **`ready` adalah klaim kuat, dan eksklusif.** `ready` hanya diberikan bila
     automation **sangat yakin**: tujuan jelas, kriteria penerimaan konkret, tanpa
     pertanyaan terbuka. Selama masih ada yang perlu dibahas, diputuskan, atau
@@ -109,6 +113,38 @@ pertentangan itu dilaporkan sebagai issue.
     dicabut workflow `label-guard.yml`, kecuali label keputusan manusia
     (`rilis-disetujui`, `rilis-ditolak`, `bot-implement`). Automasi membaca
     label, jadi label manual membuat keduanya berbeda pendapat.
+18. **Prioritas berbukti.** Prioritas dinilai dari dampak, urgensi, dan risiko;
+    apa pun di atas `medium` WAJIB menyebut bukti konkret, tanpa bukti maksimum
+    `medium`, dan bila ragu pilih yang lebih rendah. `critical` hanya untuk
+    layanan mati total, kehilangan/korupsi data, atau masalah keamanan/privacy
+    yang aktif bisa dieksploitasi. Jangan menginflasi `critical`.
+19. **Triase ulang dipicu setelah automation lain menanggapi.** Tak satu pun
+    automation memicu `issues.edited`. Sebuah jembatan deterministik
+    (`issue-triage-bridge.yml` + `.github/scripts/issue-triage-bridge.sh`)
+    mendispatch pemilik triase saat bot memasang label tipe/prioritas, dan saat
+    **sinyal aktivitas** sebuah issue belum `ready` berubah sejak checkpoint
+    terakhir jembatan. Sinyalnya adalah hash dari body issue plus setiap
+    komentar **bukan-armada** (penulis + `updated_at` + body) — jadi suntingan
+    deskripsi, komentar baru, atau komentar yang disunting semuanya mengubah
+    sinyal. Karena sinyalnya isi, bukan timestamp beresolusi detik, suntingan
+    pelapor pada detik yang sama dengan tulisan penanda tetap tertangkap
+    (perbandingan `<=`-detik lama menelannya). Komentar armada sendiri (bot dan
+    GitHub Actions) tidak dihitung, sehingga balasan bot tak pernah memicu
+    triase ulang dirinya — itu yang menutup loop. Idempoten: satu putaran = satu
+    dispatch (penanda per keadaan tipe+prioritas dalam jendela burst 300 dtk,
+    dan satu penanda sweep per issue). Penanda hanya ditulis setelah dispatch
+    diterima (HTTP 2xx), jadi dispatch yang gagal diulang sweep berikutnya dan
+    run-nya gagal keras. Issue lama yang ringkasannya ada di body tanpa
+    komentar penanda (ditriase sebelum jembatan ini ada) tetap disapu sekali,
+    bukan dilewati selamanya. Sapuan memproses setiap kandidat tanpa membiarkan
+    satu issue yang tak perlu dispatch menghentikannya, dan membaca sampai
+    `SWEEP_PAGES` halaman (urut aktivitas terbaru) sementara `SWEEP_MAX`
+    membatasi jumlah dispatch per run.
+20. **Deskripsi PR tidak ditanggapi otomatis.** Tidak ada pemicu
+    `pull_request.edited`; gerbang tinjau yang sudah ada membaca deskripsi PR,
+    issue tertaut, seluruh diff, dan semua komentar. Sebuah pemicu edit akan
+    bertabrakan dengan `basmalah.yml` yang mem-PATCH body sebagai
+    `github-actions[bot]`.
 
 ### Alur ujung ke ujung
 
@@ -122,7 +158,7 @@ flowchart TD
   TR -- keamanan --> ADV["advisory privat"]:::human
   TR -- needs-info --> CL["Penjernih issue"]:::cloud --> TR
   TR -- decision --> DEC["riset + pilihan ganda"]:::cloud --> MD{"maintainer memilih"}:::human --> TR
-  TR -- ready --> Q["antrean WIP ≤ 3"]:::gh --> IMP["Tiket jadi PR"]:::cloud
+  TR -- ready --> HO["penyerahan: label bot-implement"]:::gh --> IMP["Tiket jadi PR"]:::cloud
   IMP --> CI["CI + E2E"]:::gh --> LC{"pr-lifecycle: hijau + ready?"}:::gh
   LC -- ya --> GT["Gerbang tinjau PR"]:::cloud
   GT -- "minta perubahan (≤ 3 putaran)" --> IMP
@@ -139,10 +175,10 @@ flowchart TD
 | # | Tahap | Pemicu | Pemilik | Keluaran | Lanjut bila |
 |---|---|---|---|---|---|
 | 1 | Laporan | manusia, atau temuan automation berkala | pelapor | issue sesuai templat; temuan keamanan → advisory privat | issue terbuka |
-| 2 | Triase | `issues.opened` | `Pelabel issue` | **satu** komentar: tipe, prioritas, duplikat, kesiapan, estimasi | label `ready` / `needs-info` / `question` / `decision` / `duplicate` |
-| 3 | Klarifikasi | balasan pelapor pada `needs-info` | `Penjernih issue` | penilaian ulang dalam komentar triase yang sama | `ready` |
+| 2 | Triase | `issues.opened` | `Pelabel issue` | **satu** komentar: tipe, prioritas (berbukti), duplikat, kesiapan, estimasi | label `ready` / `needs-info` / `question` / `decision` / `duplicate` |
+| 3 | Klarifikasi | balasan pelapor pada `needs-info`, label bot, atau aktivitas baru (jembatan triase) | `Penjernih issue` / `Triase bug` | komentar penilaian ulang; body issue diperbarui hanya saat `ready` | `ready` |
 | 4 | Keputusan | label `decision` | agen riset → maintainer | riset bersumber + pilihan ganda; maintainer memilih | keputusan tercatat di `.claude/memory/decisions/`, lalu `ready` |
-| 5 | Implementasi | `ready` dan antrean WIP < 3 | `Tiket jadi PR` | PR draf dengan templat, uji, bukti, `Fixes #n` | daftar periksa penulis lengkap → ready for review |
+| 5 | Implementasi | label `bot-implement` (`Bot sebutan`, atau maintainer); `ready` saja TIDAK memicu bot | `Tiket jadi PR` | PR draf dengan templat, uji, bukti, `Fixes #n` | daftar periksa penulis lengkap → ready for review |
 | 6 | CI | push | Actions | Build, Lint, Tests, Security, E2E | semua hijau |
 | 7 | Tinjauan | `pr-lifecycle.sh` (hijau + ready; `workflow_run` atau `ready_for_review`) | `Gerbang tinjau PR` | satu review per head, dengan blok `suggestion` | approve |
 | 8 | Perbaikan | review minta perubahan | `Tiket jadi PR` | ikuti atau tolak dengan alasan; ≤ 3 putaran | head baru hijau → tahap 7 |
