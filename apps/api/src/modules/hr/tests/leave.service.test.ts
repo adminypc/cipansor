@@ -783,9 +783,12 @@ describe('updateLeave', () => {
     // `updateMany` is modelled on the row store: the store now holds APPROVED,
     // so the guarded write matches nothing and the edit is refused rather than
     // moving the dates an approval has already debited and marked attendance
-    // for. The guard, the validation and the write run in one transaction, which
-    // is what makes this a compare-and-swap and not a check on a stale snapshot.
+    // for. It is the `status: PENDING` predicate on the write that guards the
+    // change — a read inside a transaction takes no row lock, so a decision can
+    // still land between the read and the write.
     db.leave.findUnique.mockImplementation(async () => {
+      // Read with `tx`, not `prisma`, so the guard and the validation see the
+      // row this transaction will target.
       expect(db.__store.inTransaction).toBe(true);
       return leaveRow({ status: LeaveStatus.PENDING });
     });
