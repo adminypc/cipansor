@@ -52,8 +52,19 @@ esac
 # narrows the window to the PATCH call itself — the closest a compare-and-swap
 # can get without an atomic API.
 read_body() { gh api "repos/$REPO/issues/$NUMBER" --jq '.body // ""' 2>/dev/null; }
+# The description's first real content line — skipping leading blank lines and
+# any leading HTML comment. The pull-request template opens with a multi-line
+# `<!-- … -->` note, so the basmalah sits *below* it; a check that only looked at
+# the first non-blank line saw the comment, concluded "no basmalah", and stacked a
+# second copy on every templated body (found by the review gate on PR #817).
 opens_with_basmalah() {
-  h=$(printf '%s' "$1" | sed '/./,$!d' | head -n 1)
+  h=$(printf '%s' "$1" | awk '
+    /^[[:space:]]*$/ { next }
+    /^[[:space:]]*<!--/ { c = 1 }
+    c && /-->/ { c = 0; next }
+    c { next }
+    { print; exit }
+  ')
   [ "$h" = "$ARABIC" ] || [ "$h" = "$TRANSLIT" ]
 }
 

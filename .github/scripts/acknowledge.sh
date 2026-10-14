@@ -40,7 +40,12 @@ case "$BODY" in
 esac
 
 react=0
-case "$BODY" in *"@openhands"*) react=1 ;; esac
+# `Bot sebutan` is maintainer-triggered (docs/SDLC-FLOW.md): a stray mention by
+# anyone else does not start it, so it is not acknowledged either.
+case "$BODY" in
+  *"@openhands"*)
+    case "$AUTHOR" in OWNER | MEMBER | COLLABORATOR) react=1 ;; esac ;;
+esac
 case ",$LABELS," in
   *,needs-info,*)
     # Penjernih issue fires on any reply, the reporter included.

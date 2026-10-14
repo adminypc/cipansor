@@ -135,7 +135,8 @@ def new_prompt(name, prompt):
         anchor = "_This comment was created by an AI agent (OpenHands) on behalf of the maintainer._"
         idx = head.find(anchor)
         if idx >= 0:
-            end = head.index("\n", idx + len(anchor)) + 1
+            nl = head.find("\n", idx + len(anchor))
+            end = len(head) if nl < 0 else nl + 1
             head = head[:end] + "\n" + BODY_BLOCK + head[end:]
         else:
             head = BODY_BLOCK + "\n" + head

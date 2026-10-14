@@ -329,6 +329,17 @@ describe('acknowledge.sh', () => {
     expect(calls).toContain('REACT_COMMENT');
   });
 
+  it('does not acknowledge an outsider’s @openhands mention', () => {
+    // `Bot sebutan` is maintainer-triggered; a stray mention starts nothing.
+    const { calls } = run(
+      ACKNOWLEDGE,
+      { GH_STUB_LOGIN: 'cipansor-bot' },
+      ['--stdin'],
+      event({ association: 'NONE', body: '@openhands please look' })
+    );
+    expect(calls).not.toContain('REACT_COMMENT');
+  });
+
   it('acknowledges an outside reporter answering a `needs-info` issue', () => {
     // Penjernih issue fires on the reporter's reply, so it must be acknowledged.
     const { calls } = run(
@@ -399,6 +410,28 @@ describe('basmalah.sh', () => {
       ev
     );
     expect(calls).not.toContain('PATCH');
+  });
+
+  it('does not stack a second basmalah below the PR template’s leading comment', () => {
+    // The pull-request template opens with a multi-line `<!-- … -->` note, so the
+    // basmalah is the first line *after* it. A check that only looked at the first
+    // non-blank line saw the comment, thought there was no basmalah, and prepended
+    // a second copy on every templated PR (review gate, PR #817).
+    const ev = JSON.stringify({ action: 'opened', pull_request: { number: 7 } });
+    const body = `<!-- Biarkan PR ini draft sampai siap ditinjau. -->
+
+${ARABIC}
+
+## HUMAN`;
+    const { calls } = run(BASMALAH, { GH_STUB_BODY: body }, ['--stdin'], ev);
+    expect(calls).not.toContain('PATCH');
+  });
+
+  it('still prepends when a leading comment is present but no basmalah follows', () => {
+    const ev = JSON.stringify({ action: 'opened', issue: { number: 7 } });
+    const body = `<!-- a note -->\n\n## Ringkasan\nsomething`;
+    const { calls } = run(BASMALAH, { GH_STUB_BODY: body }, ['--stdin'], ev);
+    expect(calls).toContain('PATCH');
   });
 
   it('does nothing on a non-open event', () => {
