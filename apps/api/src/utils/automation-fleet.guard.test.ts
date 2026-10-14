@@ -107,11 +107,19 @@ case "$*" in
     [ -n "$m" ] && printf '%s' "$m" ;;
   *"| max //"*) printf '%s\\n' "\${GH_STUB_LASTTRIAGE:-}" ;;
   *"join(\\"+\\")"*) printf '%s\\n' "\${GH_STUB_ISSUE_LABELS:-bug+priority:medium}" ;;
-  *".body // \\"\\""*) printf '%s\\n' "\${GH_STUB_BODY:-}" ;;
   *"/comments"*".[].body"*) printf '%s\\n' "\${GH_STUB_COMMENTS:-}" ;;
   *"/issues/comments/"*"-X PATCH"*) post "$@" ;;
   *"/issues/comments/"*"-X DELETE"*) log "DELETE_MARKER" ;;
   *"/comments"*"-X POST"*) post "$@" ;;
+  *"/comments"*)
+    if [ -n "\${GH_STUB_NONFLEET:-}" ]; then
+      printf '[{"user":{"login":"%s"},"updated_at":"%s","body":%s}]\\n' \\
+        "\${GH_STUB_NONFLEET_LOGIN:-reporter}" "\${GH_STUB_NONFLEET_AT:-2026-01-01T00:00:00Z}" \\
+        "$(printf '%s' "$GH_STUB_NONFLEET" | jq -c -Rs .)"
+    else
+      printf '[]\\n'
+    fi ;;
+  *"/issues/"*) printf '{"body":%s}\\n' "$(printf '%s' "\${GH_STUB_BODY:-}" | jq -c -Rs .)" ;;
 esac
 exit 0
 `;
@@ -759,10 +767,16 @@ describe('issue-triage-bridge.sh', () => {
     });
 
   // The sweep checkpoint is a hash of the issue body plus the non-fleet comments
-  // (author + `updated_at` + body), so the test can compute the same signal the
-  // script does and store it in the marker.
-  const signal = (body: string, nonfleet = '') =>
-    createHash('sha256').update(`${body}\n${nonfleet}`).digest('hex').slice(0, 16);
+  // (author + `updated_at` + body), serialized as two compact JSON lines exactly
+  // as the script pipes them to `sha256sum` — including the trailing newline of
+  // each line, so a body that only gains a trailing newline hashes differently.
+  const signal = (body: string, nonfleet = '') => {
+    const line1 = JSON.stringify({ body });
+    const line2 = nonfleet
+      ? JSON.stringify([{ login: 'reporter', updated: '2026-01-01T00:00:00Z', body: nonfleet }])
+      : '[]';
+    return createHash('sha256').update(`${line1}\n${line2}\n`).digest('hex').slice(0, 16);
+  };
   const sweepMarker = (n: number, sig: string) =>
     `<!-- triage-bridge-sweep:${n}:${sig} -->\n\n_This comment was created by an AI agent (OpenHands) on behalf of the repository maintainers._`;
 
@@ -860,6 +874,23 @@ describe('issue-triage-bridge.sh', () => {
     expect(out).toContain('failed (HTTP 503)');
   });
 
+  it('records the sweep checkpoint after a label dispatch, so the sweep does not repeat it', () => {
+    // Finding R265: the label path wrote only the state marker, so the next
+    // sweep saw an empty checkpoint and dispatched the same activity again — two
+    // dispatches for one label. The label path must also record the sweep
+    // checkpoint of the activity it just answered.
+    const { calls } = runBridge(
+      { GH_STUB_ISSUE_LABELS: 'bug+priority:high', GH_STUB_BODY: 'triaged' },
+      ['--stdin'],
+      labeledEvent('cipansor-bot', 'bug')
+    );
+    expect(calls).toContain('DISPATCH');
+    expect(calls).toContain('POST_MARKER');
+    const sweepMarkers = calls.match(/triage-bridge-sweep:818:[0-9a-f]{16}/g) ?? [];
+    expect(sweepMarkers.length).toBe(1);
+    expect(calls).toContain(`triage-bridge-sweep:818:${signal('triaged')}`);
+  });
+
   it('dispatches a legacy issue whose body holds the summary but has no marker comment', () => {
     // #818: the triage summary lives in the body (`<!-- sdlc:triase -->`) and no
     // fleet comment exists. It must still be swept, not skipped forever.
@@ -878,6 +909,22 @@ describe('issue-triage-bridge.sh', () => {
         GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818',
         GH_STUB_BODY: 'edited',
         GH_STUB_SWEEP_MARKER: sweepMarker(818, signal('before')),
+      },
+      ['--sweep']
+    );
+    expect(calls).toContain('DISPATCH');
+  });
+
+  it('dispatches when only a trailing newline was added to the body', () => {
+    // Finding R161: reading the body through `$(…)` strips trailing newlines, so
+    // `A` and `A\n` hashed the same and the edit was missed. The body is read as
+    // JSON and hashed straight from the pipe, so the two differ.
+    expect(signal('A')).not.toBe(signal('A\n'));
+    const { calls } = runBridge(
+      {
+        GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818',
+        GH_STUB_BODY: 'A\n',
+        GH_STUB_SWEEP_MARKER: sweepMarker(818, signal('A')),
       },
       ['--sweep']
     );

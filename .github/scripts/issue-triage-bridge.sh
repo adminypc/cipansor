@@ -152,18 +152,20 @@ marker_signal() { # marker_signal <number>
 }
 
 # The issue's activity signal: a hash of the body plus every non-fleet comment's
-# author, body and `updated_at`. Independent of any single timestamp, so a
-# same-second edit is still a different signal; the fleet's own comments are
-# excluded so a bot reply never re-triages the issue. Actions comments post as
+# author, body and `updated_at`, serialized as compact JSON. Read as JSON and
+# hashed straight from the pipe — never through `$(…)`, which strips trailing
+# newlines, so a body that only gains a trailing newline would hash the same and
+# the edit would be missed. Independent of any single timestamp, so a same-second
+# edit is still a different signal; the fleet's own comments are excluded so a
+# bot reply never re-triages the issue. Actions comments post as
 # `github-actions[bot]`, so every `*[bot]` account is excluded along with the
 # automation account.
 activity_signal() { # activity_signal <number>
-  payload=$(gh api "repos/$REPO/issues/$1" --jq '.body // ""' 2>/dev/null || echo "")
-  payload="$payload
-$(gh api --paginate "repos/$REPO/issues/$1/comments?per_page=100" \
-    --jq '.[] | select(((.user.login | test("\\[bot\\]$")) or .user.login == "cipansor-bot") | not) | "\(.user.login) \(.updated_at) \(.body)"' \
-    2>/dev/null || echo "")"
-  printf '%s' "$payload" | sha256sum | cut -c1-16
+  {
+    gh api "repos/$REPO/issues/$1" 2>/dev/null | jq -c '{body: (.body // "")}'
+    gh api --paginate "repos/$REPO/issues/$1/comments?per_page=100" 2>/dev/null \
+      | jq -c '[.[] | select(((.user.login | test("\\[bot\\]$")) or .user.login == "cipansor-bot") | not) | {login: .user.login, updated: .updated_at, body: .body}]'
+  } | sha256sum | cut -c1-16
 }
 
 # Create or update the single sweep marker, editing the existing one in place.
@@ -235,9 +237,12 @@ on_label() { # on_label <event-json>
     fi
   fi
   # Record the marker only after the dispatch is accepted, so a failed dispatch
-  # is retried instead of being masked as done.
+  # is retried instead of being masked as done. The sweep checkpoint is written
+  # from the same activity, so the label dispatch and the next sweep do not both
+  # answer it (a human edit after this still changes the signal and dispatches).
   if dispatch "$number" labeled "$marker"; then
     post_marker "$number" "$marker"
+    write_sweep_marker "$number" "$(activity_signal "$number")"
   else
     echo "::warning::#${number}'s label state stays unmarked; a later label or the sweep retries."
     exit 1
