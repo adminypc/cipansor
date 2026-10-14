@@ -98,6 +98,7 @@ log "GH $*"
 case "$*" in
   *"search/issues"*) printf '%s\\n' "\${GH_STUB_SEARCH:-}" ;;
   *"[.state, (.labels[].name)]"*)
+    [ "\${GH_STUB_READ_FAIL:-}" = state ] && exit 1
     printf '%s\\n' "\${GH_STUB_STATE_LABELS:-open bug priority:medium}" ;;
   *"select(("*) printf '%s\\n' "\${GH_STUB_NONFLEET:-}" ;;
   *"startswith(\\"<!-- triage-bridge-sweep:\\")"*)
@@ -112,6 +113,7 @@ case "$*" in
   *"/issues/comments/"*"-X DELETE"*) log "DELETE_MARKER" ;;
   *"/comments"*"-X POST"*) post "$@" ;;
   *"/comments"*)
+    [ "\${GH_STUB_READ_FAIL:-}" = comments ] && exit 1
     if [ -n "\${GH_STUB_NONFLEET:-}" ]; then
       printf '[{"user":{"login":"%s"},"updated_at":"%s","body":%s}]\\n' \\
         "\${GH_STUB_NONFLEET_LOGIN:-reporter}" "\${GH_STUB_NONFLEET_AT:-2026-01-01T00:00:00Z}" \\
@@ -120,6 +122,7 @@ case "$*" in
       printf '[]\\n'
     fi ;;
   *"/issues/"*)
+    [ "\${GH_STUB_READ_FAIL:-}" = issue ] && exit 1
     # GH_STUB_BODY2, when set, is served once a dispatch has been logged — it
     # simulates an edit landing between the signal snapshot and the marker write.
     body="\${GH_STUB_BODY:-}"
@@ -917,6 +920,34 @@ describe('issue-triage-bridge.sh', () => {
     expect(calls).toContain(`triage-bridge-sweep:818:${signal('before')}`);
     // ...not the post-dispatch edit, which would have hidden it.
     expect(calls).not.toContain(`triage-bridge-sweep:818:${signal('edited-during-dispatch')}`);
+  });
+
+  it('skips an issue whose state read fails, instead of sweeping it', () => {
+    // Finding R261: a failed state read left `state` empty, no `closed`/`ready`
+    // pattern matched, and the issue was swept as if it were open.
+    const { calls, out } = runBridge(
+      { GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818', GH_STUB_READ_FAIL: 'state' },
+      ['--sweep']
+    );
+    expect(calls).not.toContain('DISPATCH');
+    expect(out).toContain('could not read #818');
+  });
+
+  it('skips an issue whose activity read fails, instead of dispatching an empty signal', () => {
+    // Finding R270: `activity_signal` swallowed the error, so an empty pipe still
+    // hashed to `e3b0c44298fc1c14` — a non-empty value that looked like a change
+    // and dispatched an unchanged issue on every sweep.
+    const { calls, out } = runBridge(
+      {
+        GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818',
+        GH_STUB_STATE_LABELS: 'open bug priority:medium',
+        GH_STUB_READ_FAIL: 'comments',
+      },
+      ['--sweep']
+    );
+    expect(calls).not.toContain('DISPATCH');
+    expect(calls).not.toContain('POST_MARKER');
+    expect(out).toContain('could not read the activity of #818');
   });
 
   it('dispatches a legacy issue whose body holds the summary but has no marker comment', () => {

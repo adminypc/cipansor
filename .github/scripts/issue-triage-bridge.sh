@@ -160,12 +160,20 @@ marker_signal() { # marker_signal <number>
 # bot reply never re-triages the issue. Actions comments post as
 # `github-actions[bot]`, so every `*[bot]` account is excluded along with the
 # automation account.
-activity_signal() { # activity_signal <number>
-  {
-    gh api "repos/$REPO/issues/$1" 2>/dev/null | jq -c '{body: (.body // "")}'
-    gh api --paginate "repos/$REPO/issues/$1/comments?per_page=100" 2>/dev/null \
-      | jq -c '[.[] | select(((.user.login | test("\\[bot\\]$")) or .user.login == "cipansor-bot") | not) | {login: .user.login, updated: .updated_at, body: .body}]'
-  } | sha256sum | cut -c1-16
+activity_signal() { # activity_signal <number>; non-zero when a read fails
+  body_json=$(gh api "repos/$REPO/issues/$1") || return 1
+  comments_json=$(gh api --paginate "repos/$REPO/issues/$1/comments?per_page=100") || return 1
+  # jq's compact JSON escapes any internal newline, so capturing the result in a
+  # variable does not lose a trailing newline the way a raw body would.
+  sig=$(
+    {
+      printf '%s' "$body_json" | jq -c '{body: (.body // "")}'
+      printf '%s' "$comments_json" \
+        | jq -c '[.[] | select(((.user.login | test("\\[bot\\]$")) or .user.login == "cipansor-bot") | not) | {login: .user.login, updated: .updated_at, body: .body}]'
+    } | sha256sum | cut -c1-16
+  )
+  [ -n "$sig" ] || return 1
+  printf '%s' "$sig"
 }
 
 # Create or update the single sweep marker, editing the existing one in place.
@@ -241,10 +249,13 @@ on_label() { # on_label <event-json>
   # activity seen here; an edit landing between the snapshot and the marker write
   # changes the signal, so the next sweep still catches it (taking the signal
   # after the dispatch would fold that edit into the checkpoint and lose it).
-  sig=$(activity_signal "$number")
+  # A failed read must not write a checkpoint (an empty signal would look like a
+  # change and re-dispatch every sweep); the label still dispatches, the sweep
+  # catches the activity up later.
+  sig=$(activity_signal "$number") || sig=""
   if dispatch "$number" labeled "$marker"; then
     post_marker "$number" "$marker"
-    write_sweep_marker "$number" "$sig"
+    if [ -n "$sig" ]; then write_sweep_marker "$number" "$sig"; fi
   else
     echo "::warning::#${number}'s label state stays unmarked; a later label or the sweep retries."
     exit 1
@@ -258,7 +269,8 @@ process_one() { # process_one <number>
 
   # A closed or `ready` issue is out of scope; drop any stale marker and stop.
   state=$(gh api "repos/$REPO/issues/$n" \
-    --jq '[.state, (.labels[].name)] | join(" ")' 2>/dev/null || echo "")
+    --jq '[.state, (.labels[].name)] | join(" ")' 2>/dev/null) \
+    || { echo "::warning::could not read #$n; skipped this sweep."; return 1; }
   case " $state " in
     *" closed "* | *" ready "*)
       remove_sweep_marker "$n"
@@ -266,7 +278,11 @@ process_one() { # process_one <number>
       ;;
   esac
 
-  sig=$(activity_signal "$n")
+  # A read failure is "skip", not "empty activity": an empty input still hashes
+  # to a non-empty value, which would look like a change and dispatch an
+  # unchanged issue on every sweep.
+  sig=$(activity_signal "$n") \
+    || { echo "::warning::could not read the activity of #$n; skipped this sweep."; return 1; }
   [ -n "$sig" ] || return 1
   # Nothing moved since the checkpoint: not a reason to triage.
   if [ "$sig" = "$(marker_signal "$n")" ]; then
