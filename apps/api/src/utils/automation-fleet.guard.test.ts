@@ -103,8 +103,16 @@ case "$*" in
   *"select(("*) printf '%s\\n' "\${GH_STUB_NONFLEET:-}" ;;
   *"startswith(\\"<!-- triage-bridge-sweep:"*)
     n=$(printf '%s' "$*" | sed -n 's#.*/issues/\\([0-9][0-9]*\\)/.*#\\1#p')
+    want=$(printf '%s' "$*" | sed -n 's#.*triage-bridge-sweep:\\([0-9][0-9]*\\):.*#\\1#p')
     m=$(printenv "GH_STUB_MARKER_$n" 2>/dev/null || true)
     [ -n "$m" ] || m="\${GH_STUB_SWEEP_MARKER:-}"
+    if [ -z "$want" ]; then
+      # A prefix with no issue number (the regression) also matches a stray
+      # marker of another number sharing the comment set.
+      m="\${GH_STUB_MARKER_STRAY:-\$m}"
+    elif [ "$want" != "$n" ]; then
+      m=""
+    fi
     [ -n "$m" ] && printf '%s' "$m" ;;
   *"| max //"*) printf '%s\\n' "\${GH_STUB_LASTTRIAGE:-}" ;;
   *"join(\\"+\\")"*) printf '%s\\n' "\${GH_STUB_ISSUE_LABELS:-bug+priority:medium}" ;;
@@ -1013,6 +1021,27 @@ describe('issue-triage-bridge.sh', () => {
         GH_STUB_BODY: 'same',
         GH_STUB_NONFLEET: '',
         GH_STUB_SWEEP_MARKER: sweepMarker(818, signal('same', '')),
+      },
+      ['--sweep']
+    );
+    expect(calls).not.toContain('DISPATCH');
+  });
+
+  it('matches a sweep marker only under its own issue number', () => {
+    // With correct number-scoping the query sees only the 818 marker, so the
+    // unchanged issue is not dispatched. The stub's numberless branch (the
+    // regression) serves GH_STUB_MARKER_STRAY instead — the same comment set
+    // with a foreign-number marker last, which a numberless prefix would read.
+    const { calls } = runBridge(
+      {
+        GH_STUB_SEARCH: '2026-10-14T02:14:15Z 818',
+        GH_STUB_BODY: 'same',
+        GH_STUB_NONFLEET: '',
+        GH_STUB_SWEEP_MARKER: sweepMarker(818, signal('same', '')),
+        // The body a numberless prefix would select as `last`: the foreign
+        // marker, so `marker_signal` returns `deadbeefdeadbeef` and the
+        // unchanged issue is dispatched (the regression).
+        GH_STUB_MARKER_STRAY: '<!-- triage-bridge-sweep:999:deadbeefdeadbeef -->',
       },
       ['--sweep']
     );
