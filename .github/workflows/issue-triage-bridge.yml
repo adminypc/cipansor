@@ -32,7 +32,6 @@ on:
 permissions:
   contents: read
   issues: write
-  pull-requests: write
 
 concurrency:
   group: issue-triage-bridge-${{ github.event.issue.number || 'sweep' }}

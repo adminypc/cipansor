@@ -101,7 +101,7 @@ case "$*" in
     [ "\${GH_STUB_READ_FAIL:-}" = state ] && exit 1
     printf '%s\\n' "\${GH_STUB_STATE_LABELS:-open bug priority:medium}" ;;
   *"select(("*) printf '%s\\n' "\${GH_STUB_NONFLEET:-}" ;;
-  *"startswith(\\"<!-- triage-bridge-sweep:\\")"*)
+  *"startswith(\\"<!-- triage-bridge-sweep:"*)
     n=$(printf '%s' "$*" | sed -n 's#.*/issues/\\([0-9][0-9]*\\)/.*#\\1#p')
     m=$(printenv "GH_STUB_MARKER_$n" 2>/dev/null || true)
     [ -n "$m" ] || m="\${GH_STUB_SWEEP_MARKER:-}"

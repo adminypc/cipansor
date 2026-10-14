@@ -68,13 +68,6 @@ BURST_WINDOW="${BURST_WINDOW:-300}"
 FOOTER="_This comment was created by an AI agent (OpenHands) on behalf of the repository maintainers._"
 MARK_PREFIX="<!-- triage-bridge-sweep:"
 
-# True when <word> is one whitespace-separated word of <haystack>.
-contains_word() { # contains_word <word> <haystack>
-  case " $2 " in
-    *" $1 "*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
 
 # A UTC timestamp as epoch seconds (0 on a parse failure).
 epoch() { date -u -d "$1" +%s 2>/dev/null || echo 0; }
@@ -146,7 +139,7 @@ $FOOTER" '{body: $body}' > "$tmp"
 # or "" when there is no marker.
 marker_signal() { # marker_signal <number>
   gh api --paginate "repos/$REPO/issues/$1/comments?per_page=100" \
-    --jq "[.[] | select(.body | startswith(\"$MARK_PREFIX\"))] | last | .body // \"\"" \
+    --jq "[.[] | select(.body | startswith(\"$MARK_PREFIX$1:\"))] | last | .body // \"\"" \
     2>/dev/null \
     | sed -n "s/^$MARK_PREFIX[0-9]*:\([^ ]*\) -->.*/\1/p" | head -n1
 }
@@ -180,7 +173,7 @@ activity_signal() { # activity_signal <number>; non-zero when a read fails
 write_sweep_marker() { # write_sweep_marker <number> <signal>
   n="$1"; sig="$2"
   cid=$(gh api --paginate "repos/$REPO/issues/$n/comments?per_page=100" \
-    --jq "[.[] | select(.body | startswith(\"$MARK_PREFIX\"))] | last | .id // \"\"" 2>/dev/null || echo "")
+    --jq "[.[] | select(.body | startswith(\"$MARK_PREFIX$n:\"))] | last | .id // \"\"" 2>/dev/null || echo "")
   tmp=$(mktemp)
   # The signal is the checkpoint: it is the activity this run has answered, so
   # the next sweep only re-dispatches when the signal changes again.
@@ -201,7 +194,7 @@ $FOOTER" '{body: $body}' > "$tmp"
 # and a stale marker must not linger to mislead a later reader.
 remove_sweep_marker() { # remove_sweep_marker <number>
   cid=$(gh api --paginate "repos/$REPO/issues/$1/comments?per_page=100" \
-    --jq "[.[] | select(.body | startswith(\"$MARK_PREFIX\"))] | last | .id // \"\"" 2>/dev/null || echo "")
+    --jq "[.[] | select(.body | startswith(\"$MARK_PREFIX$1:\"))] | last | .id // \"\"" 2>/dev/null || echo "")
   if [ -n "$cid" ]; then
     gh api "repos/$REPO/issues/comments/$cid" -X DELETE >/dev/null 2>&1 \
       || echo "::warning::could not remove the triage-bridge marker on #$1."
