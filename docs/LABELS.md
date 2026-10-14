@@ -117,6 +117,54 @@ sync` workflow adds anything missing and **fails the check** when the type
    a block. A suggestion is never placed on a line the automation is not certain
    of. This is the same "suggest a change" affordance Copilot's review uses.
 
+8. **`ready` is a strong claim, and it is exclusive.** `Pelabel issue` applies
+   `ready` only when it is **very sure**: the goal is clear, the acceptance
+   criterion is concrete and observable, and **no question is left open**. While
+   anything still has to be discussed, decided, or criticized — a design choice,
+   an unknown scope, a premise that may not hold — it is not `ready` yet; apply
+   `needs-info` (or `question`, for a question rather than a change) and name
+   what is missing. `ready` must never sit beside `question`, `needs-info`, or
+   `pending-maintainer`: two labels that contradict each other make the
+   machine-readable state ambiguous (#814 carried `ready` and `question`
+   together). The automations are told to criticize hard and ask probing
+   questions until they are sure, precisely so `ready` is not applied early.
+   `label-guard.sh` enforces the exclusivity: it removes `ready` whenever it
+   still coexists with an exclusion once the event's own label is accounted for,
+   so a person adding a second exclusion beside an existing `ready` does not
+   leave the issue contradictory.
+
+9. **The final word lives in the description, not in the comments.** Triage,
+   estimate, QA result, review verdict — everything a person has to act on — is
+   written into the issue or pull request **body**, under a stable marker (for
+   example `<!-- sdlc:triase -->`), and updated in place. A thread of comments
+   makes the final decision impossible to find; one description keeps it in one
+   place. Comments stay for the conversation that leads there.
+
+10. **Only `cipansor-bot` labels.** Every label in the taxonomy above is the
+    bot's to apply. A protected label added by any other account is removed by
+    the `Label guard` workflow and the account is told once. The protected set is
+    every label that exists in the repository minus the human-decision labels
+    (`rilis-disetujui`, `rilis-ditolak`, `bot-implement`), read at run time — a
+    new label is protected the moment it is created. A GitHub App (`*[bot]`) is
+    exempt, because the Actions workflows label through `github-actions[bot]`.
+    A person states what they want and the bot records it; this is what keeps
+    the automations and the guards reading the same state.
+
+11. **Every main description opens with the basmalah.** Each issue and pull
+    request body starts with «بِسْمِ اللَّهِ الرَّحْمَنِ الرَّحِيمِ»
+    (`Bismillaahirrohmaanirrohiim` where Arabic cannot be typed), then a blank
+    line. The pull-request template carries it in the body; the issue forms show
+    it as a visible prompt (a form's `markdown` block is preview only and never
+    lands in the body), so for issues the `Basmalah` workflow is what puts it
+    there — it prepends the line to a description that lacks it (idempotent — it
+    never stacks), and the automations are told to open their own bodies with it.
+
+12. **An automation acknowledges before it works.** The fleet reacts `👀` on the
+    issue, pull request, or comment it is about to handle — a comment trigger
+    through the `Acknowledge` workflow, the rest from their own prompts — so a
+    person can see the automation is working before the answer lands.
+
+
 ## Which automation owns which label
 
 | Automation          | Trigger                                        | Labels it sets                                                     |
@@ -134,8 +182,9 @@ sync` workflow adds anything missing and **fails the check** when the type
 
 The deterministic consequences are GitHub Actions workflows
 (`issue-label-sync.yml`, `pr-lifecycle.yml`, `duplicate-sweep.yml`,
-`gate-watch.yml`), not
-automations: they must fire every time and cost no tokens.
+`gate-watch.yml`, `label-guard.yml`, `basmalah.yml`, `acknowledge.yml`), not
+automations: they must fire every time and cost no tokens. `label-guard.yml`
+enforces rule 10, `basmalah.yml` rule 11, and `acknowledge.yml` rule 12.
 
 ## The self-comment loop guard
 
