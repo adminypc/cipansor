@@ -2584,21 +2584,30 @@ export async function approveLeave(id: string, approverId: string, data: Approve
     );
   }
 
-  const updateData: Prisma.LeaveUpdateInput = {
-    status: data.status,
-    approvedBy: { connect: { id: approverId } },
-    approvedAt: new Date(),
-  };
-
-  if (data.status === LeaveStatus.REJECTED && data.rejectedNote) {
-    updateData.rejectedNote = data.rejectedNote;
-  }
+  const approvedAt = new Date();
 
   // A rejection changes only the row; it has no side effects to keep in step.
+  // It still claims the decision with a compare-and-swap on `status`, so it
+  // cannot overwrite an approval or cancellation that committed between the
+  // guard above and this write. `approvedById` is the scalar side of the
+  // relation, so the unchecked input is used (`updateMany` cannot `connect`).
   if (data.status !== LeaveStatus.APPROVED) {
-    return prisma.leave.update({
+    const claimed = await prisma.leave.updateMany({
+      where: { id, status: LeaveStatus.PENDING },
+      data: {
+        status: data.status,
+        approvedById: approverId,
+        approvedAt,
+        ...(data.rejectedNote ? { rejectedNote: data.rejectedNote } : {}),
+      },
+    });
+    if (claimed.count === 0) {
+      throw Errors.conflict(
+        'Permintaan cuti sudah tidak berstatus menunggu; muat ulang sebelum mengambil keputusan.'
+      );
+    }
+    return prisma.leave.findUniqueOrThrow({
       where: { id },
-      data: updateData,
       include: { staff: true, teacher: true },
     });
   }
@@ -2620,7 +2629,7 @@ export async function approveLeave(id: string, approverId: string, data: Approve
   const claimData: Prisma.LeaveUncheckedUpdateManyInput = {
     status: data.status,
     approvedById: approverId,
-    approvedAt: updateData.approvedAt,
+    approvedAt,
   };
 
   return prisma.$transaction(async (tx) => {

@@ -446,7 +446,10 @@ describe('approveLeave', () => {
 
   it('records a rejection note and touches neither the balance nor attendance', async () => {
     db.leave.findUnique.mockResolvedValue(leaveRow({ status: LeaveStatus.PENDING }));
-    db.leave.update.mockResolvedValue(
+    // The rejection claims the decision with a guarded `updateMany` (so it
+    // cannot overwrite a concurrent approval/cancellation), then reads the row.
+    db.leave.updateMany.mockResolvedValue({ count: 1 });
+    db.leave.findUniqueOrThrow.mockResolvedValue(
       leaveRow({ status: LeaveStatus.REJECTED, staff: null, teacher: { userId: 'user-1' } })
     );
 
@@ -455,20 +458,36 @@ describe('approveLeave', () => {
       rejectedNote: 'staf tidak cukup',
     });
 
-    expect(db.leave.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          status: LeaveStatus.REJECTED,
-          rejectedNote: 'staf tidak cukup',
-          approvedBy: { connect: { id: 'approver-1' } },
-        }),
-      })
-    );
+    expect(db.leave.updateMany).toHaveBeenCalledWith({
+      where: { id: 'leave-1', status: LeaveStatus.PENDING },
+      data: expect.objectContaining({
+        status: LeaveStatus.REJECTED,
+        rejectedNote: 'staf tidak cukup',
+        approvedById: 'approver-1',
+      }),
+    });
+    // The unconditional `update` that used to overwrite an approved row is gone.
+    expect(db.leave.update).not.toHaveBeenCalled();
     expect(db.leaveBalance.update).not.toHaveBeenCalled();
     expect(db.staffAttendance.upsert).not.toHaveBeenCalled();
     expect(db.staffAttendance.update).not.toHaveBeenCalled();
     expect(db.staffAttendance.create).not.toHaveBeenCalled();
     expect(db.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('refuses to reject a leave that stopped being pending before the write', async () => {
+    // The guard read PENDING, but an approval/cancellation committed first, so
+    // the compare-and-swap matches no row and the rejection is refused rather
+    // than overwriting the newer decision.
+    db.leave.findUnique.mockResolvedValue(leaveRow({ status: LeaveStatus.PENDING }));
+    db.leave.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(
+      approveLeave('leave-1', 'approver-1', { status: LeaveStatus.REJECTED })
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(db.leave.findUniqueOrThrow).not.toHaveBeenCalled();
+    expect(db.leaveBalance.update).not.toHaveBeenCalled();
+    expect(db.staffAttendance.create).not.toHaveBeenCalled();
   });
 
   it('spends the balance once and marks attendance when approving a pending leave', async () => {
