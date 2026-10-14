@@ -309,3 +309,18 @@ PR #817, 2026-10-13.) The fix computes the conflict from the **effective** set �
 the event's label ignored only when it will actually be revoked — and asserts
 the two-exclusion case, not just the single one. When a decision has an
 exception, the guard must exercise the state *after* the exception is applied.
+
+## An idempotence check that looked at the wrong first line
+
+`basmalah.sh`'s "does this body already open with the basmalah?" test took the
+first non-blank line. The pull-request template opens with a multi-line
+`<!-- … -->` note, so that line was the comment, not the basmalah — the script
+concluded the body lacked it and prepended a **second** copy to every templated
+PR (review gate, PR #817, 2026-10-13). The guard test missed it because its
+fixture body was `A plain report`; the "fleet contracts" test only asserted the
+template *contains* the basmalah, never that the script recognizes it. Two
+lessons: when a check means "the body starts with X", decide what "starts"
+means against a real body (skip blanks **and** leading HTML comments), and drive
+the guard with the **actual artefact** it protects (here, the template file),
+not a hand-made string. Prove it red by running the old script against the real
+template.
