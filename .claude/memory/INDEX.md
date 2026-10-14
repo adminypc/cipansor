@@ -76,6 +76,7 @@ the mechanical cases.
 - [branch-switch-stale-artifacts](lessons/branch-switch-stale-artifacts.md) — rebuild `shared` and regenerate Prisma after checkout or stash
 - [pnpm-install-silently-installs-nothing](lessons/pnpm-install-silently-installs-nothing.md) — exit 0, nothing installed; `CI=true`
 - [audit-deps-fails-on-time-not-diff](lessons/audit-deps-fails-on-time-not-diff.md) — the Security job reds on the date, and greens without checking
+- [pnpm-12-second-permission-surface](lessons/pnpm-12-second-permission-surface.md) — `allowBuilds` covers build scripts only; dependency agent skills are a second surface, decided in `permissions`, guarded statically + by `pnpm permissions list`
 - [github-actions-minutes-exhausted](lessons/github-actions-minutes-exhausted.md) — a 2-second job with no steps is a billing wall; read the annotation
 - [gh-cli-and-shell-traps](lessons/gh-cli-and-shell-traps.md) — `gh pr edit` does nothing; unquoted heredocs run backticks; all green yet BLOCKED = a CodeQL category missing
 - [docker-image-size-traps](lessons/docker-image-size-traps.md) — Prisma's optional peer, `chown -R`, recursive `*.sql` in `.dockerignore`

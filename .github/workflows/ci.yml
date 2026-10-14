@@ -24,7 +24,7 @@ permissions:
 
 env:
   NODE_VERSION: '22'
-  PNPM_VERSION: '9.15.9'
+  PNPM_VERSION: '12.11.2'
 
 jobs:
   # Does this change touch code at all? A change to documentation or agent
