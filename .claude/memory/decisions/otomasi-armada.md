@@ -76,10 +76,30 @@
       melihat automation bekerja sebelum jawabannya tiba. Pemicu komentar
       dijaga `acknowledge.yml` (hanya saat automation akan benar-benar jalan);
       automation lain melakukannya dari promptnya.
-    - **Satu deskripsi.** Kesimpulan final (triase, estimasi, QA, putusan
-      tinjauan) ditulis ke **body** issue/PR di bawah penanda tetap
-      (`<!-- sdlc:… -->`) dan diperbarui di tempat, bukan tersebar di komentar
-      yang membuat yang final sulit ditemukan.
+    - **Komentar dulu, body saat `ready`.** (2026-10-14, pengguna; menggantikan
+      "Satu deskripsi" versi 2026-10-13.) Selama issue belum `ready`, triase,
+      estimasi, kriteria, dan pertanyaan terbuka ditulis sebagai **komentar**
+      (percakapan kerja); **body** issue diperbarui hanya saat bot memasang
+      `ready`, dengan ringkasan final di bawah penanda tetap
+      (`<!-- sdlc:triase -->`). PR tetap: putusan tinjauan/QA ke **body** PR di
+      bawah penanda (`<!-- sdlc:gerbang -->`). Pemicunya: issue #818 — body
+      terisi kesimpulan bot sejak putaran pertama, dan tidak ada yang memicu
+      `issues.edited`, jadi suntingan deskripsi oleh manusia tak ditanggapi.
+    - **Prioritas berbukti.** Prioritas dinilai dari dampak, urgensi, dan risiko;
+      apa pun di atas `medium` wajib menyebut bukti konkret, tanpa bukti
+      maksimum `medium`, bila ragu pilih yang lebih rendah. `critical` hanya
+      untuk layanan mati total, kehilangan/korupsi data, atau masalah
+      keamanan/privacy (UU PDP) yang aktif bisa dieksploitasi. Jangan
+      menginflasi `critical`. (2026-10-14, pengguna.)
+    - **Triase ulang lewat jembatan, bukan `issues.edited`.** Tak satu pun
+      automation memicu `issues.edited`. `issue-triage-bridge.yml` +
+      `.github/scripts/issue-triage-bridge.sh` mendispatch pemilik triase saat
+      bot memasang label tipe/prioritas dan saat issue belum `ready` punya
+      aktivitas baru (komentar atau suntingan deskripsi). Idempoten (penanda per
+      keadaan tipe+prioritas, dan per stempel aktivitas). **Deskripsi PR tidak
+      ditanggapi otomatis** — tidak ada pemicu `pull_request.edited`; gerbang
+      tinjau sudah membaca deskripsi, issue, diff, dan semua komentar.
+      (2026-10-14, pengguna; menutup #818.)
     - **Basmalah.** Setiap body dibuka dengan «بِسْمِ اللَّهِ الرَّحْمَنِ الرَّحِيمِ»;
       templat PR membawanya di body, form issue hanya menampilkannya sebagai
       petunjuk (blok `markdown` form tidak ikut ke body), dan `basmalah.yml`

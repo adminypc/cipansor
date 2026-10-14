@@ -96,10 +96,14 @@ pertentangan itu dilaporkan sebagai issue.
     komentar), supaya orang melihat automation bekerja sebelum jawabannya tiba
     (diminta pengguna 2026-10-13). Pemicu komentar ditangani workflow
     `acknowledge.yml`; automation lain melakukannya dari promptnya.
-15. **Satu deskripsi, satu kesimpulan.** Kesimpulan akhir — triase, estimasi,
-    hasil QA, putusan tinjauan, pertanyaan terbuka — ditulis ke **body** issue
-    atau PR di bawah penanda tetap (mis. `<!-- sdlc:triase -->`) dan diperbarui
-    di tempat, bukan tersebar di komentar. Setiap body dibuka dengan basmalah.
+15. **Issue: komentar dulu, body saat `ready`.** Selama issue belum `ready`,
+    triase, estimasi, kriteria, dan pertanyaan terbuka ditulis sebagai
+    **komentar** — percakapan kerja. **Body** issue hanya diperbarui saat bot
+    memasang `ready`: ringkasan final ditulis ke body di bawah penanda tetap
+    (mis. `<!-- sdlc:triase -->`), diperbarui di tempat. PR berbeda — putusan
+    tinjauan dan hasil QA ditulis ke **body** PR di bawah penanda (mis.
+    `<!-- sdlc:gerbang -->`), karena PR sudah artefak yang selesai. Setiap body
+    dibuka dengan basmalah.
 16. **`ready` adalah klaim kuat, dan eksklusif.** `ready` hanya diberikan bila
     automation **sangat yakin**: tujuan jelas, kriteria penerimaan konkret, tanpa
     pertanyaan terbuka. Selama masih ada yang perlu dibahas, diputuskan, atau
@@ -109,6 +113,23 @@ pertentangan itu dilaporkan sebagai issue.
     dicabut workflow `label-guard.yml`, kecuali label keputusan manusia
     (`rilis-disetujui`, `rilis-ditolak`, `bot-implement`). Automasi membaca
     label, jadi label manual membuat keduanya berbeda pendapat.
+18. **Prioritas berbukti.** Prioritas dinilai dari dampak, urgensi, dan risiko;
+    apa pun di atas `medium` WAJIB menyebut bukti konkret, tanpa bukti maksimum
+    `medium`, dan bila ragu pilih yang lebih rendah. `critical` hanya untuk
+    layanan mati total, kehilangan/korupsi data, atau masalah keamanan/privacy
+    yang aktif bisa dieksploitasi. Jangan menginflasi `critical`.
+19. **Triase ulang dipicu setelah automation lain menanggapi.** Tak satu pun
+    automation memicu `issues.edited`. Sebuah jembatan deterministik
+    (`issue-triage-bridge.yml` + `.github/scripts/issue-triage-bridge.sh`)
+    mendispatch pemilik triase saat bot memasang label tipe/prioritas, dan saat
+    issue belum `ready` punya aktivitas (komentar atau suntingan deskripsi)
+    yang lebih baru dari triase terakhir. Idempoten: satu putaran = satu
+    dispatch (penanda per keadaan tipe+prioritas, dan per stempel aktivitas).
+20. **Deskripsi PR tidak ditanggapi otomatis.** Tidak ada pemicu
+    `pull_request.edited`; gerbang tinjau yang sudah ada membaca deskripsi PR,
+    issue tertaut, seluruh diff, dan semua komentar. Sebuah pemicu edit akan
+    bertabrakan dengan `basmalah.yml` yang mem-PATCH body sebagai
+    `github-actions[bot]`.
 
 ### Alur ujung ke ujung
 
@@ -139,8 +160,8 @@ flowchart TD
 | # | Tahap | Pemicu | Pemilik | Keluaran | Lanjut bila |
 |---|---|---|---|---|---|
 | 1 | Laporan | manusia, atau temuan automation berkala | pelapor | issue sesuai templat; temuan keamanan → advisory privat | issue terbuka |
-| 2 | Triase | `issues.opened` | `Pelabel issue` | **satu** komentar: tipe, prioritas, duplikat, kesiapan, estimasi | label `ready` / `needs-info` / `question` / `decision` / `duplicate` |
-| 3 | Klarifikasi | balasan pelapor pada `needs-info` | `Penjernih issue` | penilaian ulang dalam komentar triase yang sama | `ready` |
+| 2 | Triase | `issues.opened` | `Pelabel issue` | **satu** komentar: tipe, prioritas (berbukti), duplikat, kesiapan, estimasi | label `ready` / `needs-info` / `question` / `decision` / `duplicate` |
+| 3 | Klarifikasi | balasan pelapor pada `needs-info`, label bot, atau aktivitas baru (jembatan triase) | `Penjernih issue` / `Triase bug` | komentar penilaian ulang; body issue diperbarui hanya saat `ready` | `ready` |
 | 4 | Keputusan | label `decision` | agen riset → maintainer | riset bersumber + pilihan ganda; maintainer memilih | keputusan tercatat di `.claude/memory/decisions/`, lalu `ready` |
 | 5 | Implementasi | `ready` dan antrean WIP < 3 | `Tiket jadi PR` | PR draf dengan templat, uji, bukti, `Fixes #n` | daftar periksa penulis lengkap → ready for review |
 | 6 | CI | push | Actions | Build, Lint, Tests, Security, E2E | semua hijau |
