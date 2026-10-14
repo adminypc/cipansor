@@ -94,11 +94,17 @@
     - **Triase ulang lewat jembatan, bukan `issues.edited`.** Tak satu pun
       automation memicu `issues.edited`. `issue-triage-bridge.yml` +
       `.github/scripts/issue-triage-bridge.sh` mendispatch pemilik triase saat
-      bot memasang label tipe/prioritas dan saat issue belum `ready` punya
-      aktivitas baru (komentar atau suntingan deskripsi). Idempoten (penanda per
-      keadaan tipe+prioritas, dan per stempel aktivitas). **Deskripsi PR tidak
-      ditanggapi otomatis** — tidak ada pemicu `pull_request.edited`; gerbang
-      tinjau sudah membaca deskripsi, issue, diff, dan semua komentar.
+      bot memasang label tipe/prioritas dan saat **sinyal aktivitas** sebuah
+      issue belum `ready` berubah sejak checkpoint terakhir. Sinyalnya adalah
+      hash isi — body issue plus tiap komentar bukan-armada (penulis +
+      `updated_at` + body) — sehingga suntingan deskripsi, komentar baru, atau
+      komentar yang disunting semuanya terdeteksi, termasuk suntingan pada detik
+      yang sama dengan penulisan penanda (perbandingan timestamp beresolusi detik
+      dulu menelannya). Komentar armada sendiri (`*[bot]`, `cipansor-bot`)
+      dikecualikan agar bot tidak memicu triase ulang dirinya. Idempoten (penanda
+      per keadaan tipe+prioritas, dan penanda sweep per sinyal). **Deskripsi PR
+      tidak ditanggapi otomatis** — tidak ada pemicu `pull_request.edited`;
+      gerbang tinjau sudah membaca deskripsi, issue, diff, dan semua komentar.
       (2026-10-14, pengguna; menutup #818.)
     - **Basmalah.** Setiap body dibuka dengan «بِسْمِ اللَّهِ الرَّحْمَنِ الرَّحِيمِ»;
       templat PR membawanya di body, form issue hanya menampilkannya sebagai
