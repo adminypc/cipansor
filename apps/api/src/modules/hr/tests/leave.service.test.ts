@@ -779,11 +779,25 @@ describe('updateLeave', () => {
   });
 
   it('refuses an edit whose pending status was decided before the guarded write', async () => {
-    // The read saw PENDING, but an approval/cancellation committed before the
-    // guarded write. The write matches nothing and the edit is refused rather
-    // than moving the dates an approval has already marked attendance for.
-    db.leave.findUnique.mockResolvedValue(leaveRow({ status: LeaveStatus.PENDING }));
-    db.leave.updateMany.mockResolvedValue({ count: 0 });
+    // The read saw PENDING, but an approval committed before the guarded write.
+    // `updateMany` is modelled on the row store: the store now holds APPROVED,
+    // so the guarded write matches nothing and the edit is refused rather than
+    // moving the dates an approval has already debited and marked attendance
+    // for. The guard, the validation and the write run in one transaction, which
+    // is what makes this a compare-and-swap and not a check on a stale snapshot.
+    db.leave.findUnique.mockImplementation(async () => {
+      expect(db.__store.inTransaction).toBe(true);
+      return leaveRow({ status: LeaveStatus.PENDING });
+    });
+    db.leave.updateMany.mockImplementation(
+      async ({ where }: { where: { status?: LeaveStatus } }) => {
+        // An approval commits while this edit is in flight, between the read and
+        // the guarded write: the row the edit would write is no longer PENDING.
+        db.__store.leaveStatus = LeaveStatus.APPROVED;
+        if (where.status && db.__store.leaveStatus !== where.status) return { count: 0 };
+        return { count: 1 };
+      }
+    );
 
     await expect(
       updateLeave('leave-1', {
@@ -792,6 +806,8 @@ describe('updateLeave', () => {
       })
     ).rejects.toThrow(/sudah diputuskan/i);
 
+    // The edit wrote nothing: no unconditional `update`, no re-read of a row it
+    // does not own.
     expect(db.leave.update).not.toHaveBeenCalled();
     expect(db.leave.findUniqueOrThrow).not.toHaveBeenCalled();
   });
